@@ -17,17 +17,24 @@
 #define CHAN_SPEED      (2400)          // MT/s
 #define ECC_PARITY      (600)           // How many bytes used for LDPC parity in one 4KiB codeword
 #define tR              (40)            // tR in micro-seconds
+#define tPROG           (800)           // tPROG in micro-seconds
+#define tERASE          (3000)          // tERASE in micro-seconds
 #define QD              (512)           // How many ACT cmds used
 #define CHAN_NUM        (16)            // How many channels
 #define DIE_NUM         (128)           // Total die num
 #define PLANE           (4)             // How many planes in one die (Have not adapt 6 plane scenario)
 #define IWL_SLOT        (256)           // Max parallelism for IWL read (e.g., 256 for QLTC, 512 for Aspen, but it reduces with channel num)
+#define READ_RATIO      (100)           // Read ratio percentage
+#define WRITE_RATIO     (0)             // Write ratio percentage
+#define ERASE_RATIO     (0)             // Erase ratio percentage
 /***************************************************************************************************/
 
 // No need to change in genereal
 #define TIME_SCALE      (1000ULL)
 #define CMD_TIME        (CMD_OVERHEAD * TIME_SCALE)
 #define TREAD           (tR * TIME_SCALE)
+#define TPROG           (tPROG * TIME_SCALE)
+#define TERASE          (tERASE * TIME_SCALE)
 #define DATA_TIME       ((4096 + ECC_PARITY) * TIME_SCALE / CHAN_SPEED)
 #define SLOT            (IWL_SLOT)
 #define ELEMENT         (1 * 32 * 1024)
@@ -39,6 +46,22 @@ enum CHAN_STATE {
     CHAN_IDLE,
     CHAN_CMD,
     CHAN_DATA,
+};
+
+enum OP_TYPE {
+    OP_READ,
+    OP_WRITE,
+    OP_ERASE,
+};
+
+enum DIE_STATE {
+    DIE_IDLE,
+    DIE_CMD,
+    DIE_READ_WAIT,
+    DIE_READ_DATA,
+    DIE_WRITE_DATA,
+    DIE_WRITE_WAIT,
+    DIE_ERASE_WAIT,
 };
 
 struct timeval tv;
@@ -60,23 +83,23 @@ typedef struct list_s {
 typedef struct chan_s {
     int state;
     int act;
-    uint32_t list_info;
+    int op;
+    int die;
     uint64_t time;
 } chan_t;
 
 int map[CMD_CNT];
-list_t list_slot[CHAN_NUM][DIE_PER_CHAN][PLANE];
+int cmd_op[CMD_CNT];
+list_t list_slot[CHAN_NUM][DIE_PER_CHAN];
+int die_state[CHAN_NUM][DIE_PER_CHAN];
+int rr_die[CHAN_NUM];
 chan_t chan[CHAN_NUM];
 
 uint64_t total_active;
 uint64_t total_loops;
 
-inline void update_list_head(int plane, int plane_share, int act) {
-    int die = plane / PLANE;
-    int chan = die % CHAN_NUM;
-    int die_in_chan = die / CHAN_NUM;
-    int list_dest = (plane % PLANE) / plane_share;
-    list_t *list = &(list_slot[chan][die_in_chan][list_dest]);
+inline void update_list_head(int chan, int die_in_chan, int act) {
+    list_t *list = &(list_slot[chan][die_in_chan]);
     list->list[list->head] = act;
     list->head++;
     if (list->head == SLOT) {
@@ -87,12 +110,8 @@ inline void update_list_head(int plane, int plane_share, int act) {
     }
 }
 
-inline void update_list_time(uint64_t time, uint64_t add_time, list_t *list) {
-    list->time = time + add_time;
-}
-
-inline void update_list_tail(list_t *list) {
-    list->act = list->list[list->tail];
+inline int pop_list(list_t *list) {
+    int act = list->list[list->tail];
     list->tail++;
     if (list->tail == SLOT) {
         list->tail = 0;
@@ -100,57 +119,65 @@ inline void update_list_tail(list_t *list) {
     if (list->head == list->tail) {
         list->empty = 1;
     }
+    return act;
+}
+
+inline int select_op() {
+    int total = READ_RATIO + WRITE_RATIO + ERASE_RATIO;
+    int r = rand() % total;
+    if (r < READ_RATIO) {
+        return OP_READ;
+    }
+    r -= READ_RATIO;
+    if (r < WRITE_RATIO) {
+        return OP_WRITE;
+    }
+    return OP_ERASE;
 }
 
 int main() {
-    int i, j, k;
-    long cnt = 0;
-    uint64_t IOPS;
-    uint64_t list_info;
+    int i, j;
     uint64_t cur_time;
     uint64_t total_cmd;
-    int plane_share = 1;
-    int plane;
     int act;
-    int cmd_cnt = 0;
     int tmp_cmd_cnt = 0;
     int can_break;
-    int active, print;
     int tmp;
     uint64_t start_time;
     uint64_t end_time;
     int xor_ratio;
+    int inflight_cmds = 0;
 
     srand((unsigned)time(NULL));
     total_active = 0;
     total_loops = 0;
-
-    if (PLANE * DIE_NUM > SLOT) {
-        plane_share = PLANE * DIE_NUM / SLOT;
-        if (plane_share != 2 && plane_share != 4) {
-            printf("Error planes! plane_share = %d\n", plane_share);
-            exit(1);
-        }
+    if (READ_RATIO + WRITE_RATIO + ERASE_RATIO <= 0) {
+        printf("Error ratios! total ratio must be positive\n");
+        exit(1);
     }
 
     for (i = 0; i < CHAN_NUM; i++) {
         for (j = 0; j < DIE_PER_CHAN; j++) {
-            for (k = 0; k < PLANE; k++) {
-                list_slot[i][j][k].head = 0;
-                list_slot[i][j][k].tail = 0;
-                list_slot[i][j][k].act = 0xFFF;
-                list_slot[i][j][k].empty = 1;
-                list_slot[i][j][k].time = 0;
-            }
+            list_slot[i][j].head = 0;
+            list_slot[i][j].tail = 0;
+            list_slot[i][j].act = 0xFFF;
+            list_slot[i][j].empty = 1;
+            list_slot[i][j].time = 0;
+            die_state[i][j] = DIE_IDLE;
         }
     }
 
     for (i = 0; i < CHAN_NUM; i++) {
         chan[i].state = CHAN_IDLE;
+        chan[i].act = 0xFFF;
+        chan[i].op = OP_READ;
+        chan[i].die = -1;
+        rr_die[i] = 0;
     }
 
     for (i = 0; i < CMD_CNT; i++) {
         map[i] = 0;
+        cmd_op[i] = OP_READ;
     }
 
     total_cmd = 0;
@@ -166,17 +193,19 @@ int main() {
             tmp_cmd_cnt = (int)(CMD_CNT * 0.8);
         }
 
-        if (total_cmd > tmp_cmd_cnt && start_time == 0) {
+        if (total_cmd > (uint64_t)tmp_cmd_cnt && start_time == 0) {
             start_time = get_time_us();
         }
 
-        if (cmd_cnt < tmp_cmd_cnt) {
+        if (inflight_cmds < tmp_cmd_cnt) {
             for (i = 0; i < CMD_CNT; i++) {
                 if (map[i] == 0) {
                     act = i;
-                    plane = rand() % (PLANE * DIE_NUM);
-                    update_list_head(plane, plane_share, act);
+                    cmd_op[act] = select_op();
+                    tmp = rand() % DIE_NUM;
+                    update_list_head(tmp % CHAN_NUM, tmp / CHAN_NUM, act);
                     map[i] = 1;
+                    inflight_cmds++;
                     break;
                 }
             }
@@ -188,39 +217,50 @@ int main() {
                     can_break = 0;
                     cur_time = get_time_us();
                     for (j = 0; j < DIE_PER_CHAN; j++) {
-                        for (k = 0; k < PLANE / plane_share; k++) {
-                            if (list_slot[i][j][k].empty == 0 &&
-                                list_slot[i][j][k].act == 0xFFF) {
-                                chan[i].state = CHAN_CMD;
-                                chan[i].time = cur_time + CMD_TIME;
-                                tmp = list_slot[i][j][k].tail;
-                                chan[i].act = list_slot[i][j][k].list[tmp];
-                                chan[i].list_info = (j << 16) | k;
-                                update_list_tail(&list_slot[i][j][k]);
-                                can_break = 1;
-                                break;
-                            }
+                        if ((die_state[i][j] == DIE_WRITE_WAIT ||
+                             die_state[i][j] == DIE_ERASE_WAIT) &&
+                            list_slot[i][j].act != 0xFFF &&
+                            cur_time >= list_slot[i][j].time) {
+                            act = list_slot[i][j].act;
+                            list_slot[i][j].act = 0xFFF;
+                            die_state[i][j] = DIE_IDLE;
+                            map[act] = 0;
+                            inflight_cmds--;
+                            total_cmd++;
                         }
+                    }
 
-                        if (can_break) {
+                    for (j = 0; j < DIE_PER_CHAN; j++) {
+                        int die = (rr_die[i] + j) % DIE_PER_CHAN;
+                        if (die_state[i][die] == DIE_IDLE &&
+                            list_slot[i][die].empty == 0) {
+                            act = pop_list(&list_slot[i][die]);
+                            list_slot[i][die].act = act;
+                            die_state[i][die] = DIE_CMD;
+                            chan[i].state = CHAN_CMD;
+                            chan[i].time = cur_time + CMD_TIME;
+                            chan[i].act = act;
+                            chan[i].op = cmd_op[act];
+                            chan[i].die = die;
+                            rr_die[i] = (die + 1) % DIE_PER_CHAN;
+                            can_break = 1;
                             break;
                         }
                     }
 
                     if (can_break == 0) {
                         for (j = 0; j < DIE_PER_CHAN; j++) {
-                            for (k = 0; k < PLANE / plane_share; k++) {
-                                if (list_slot[i][j][k].act != 0xFFF &&
-                                    cur_time >= list_slot[i][j][k].time) {
-                                    chan[i].state = CHAN_DATA;
-                                    chan[i].time = cur_time + DATA_TIME;
-                                    chan[i].act = list_slot[i][j][k].act;
-                                    chan[i].list_info = (j << 16) | k;
-                                    can_break = 1;
-                                    break;
-                                }
-                            }
-                            if (can_break) {
+                            int die = (rr_die[i] + j) % DIE_PER_CHAN;
+                            if (die_state[i][die] == DIE_READ_WAIT &&
+                                cur_time >= list_slot[i][die].time) {
+                                chan[i].state = CHAN_DATA;
+                                chan[i].time = cur_time + DATA_TIME;
+                                chan[i].act = list_slot[i][die].act;
+                                chan[i].op = OP_READ;
+                                chan[i].die = die;
+                                die_state[i][die] = DIE_READ_DATA;
+                                rr_die[i] = (die + 1) % DIE_PER_CHAN;
+                                can_break = 1;
                                 break;
                             }
                         }
@@ -229,30 +269,47 @@ int main() {
                 case CHAN_CMD:
                     cur_time = get_time_us();
                     if (cur_time >= chan[i].time) {
-                        chan[i].state = CHAN_IDLE;
-                        list_info = chan[i].list_info;
-                        list_slot[i][list_info >> 16][list_info & 0xFFFF].act =
-                            chan[i].act;
-                        chan[i].act = 0xFFF;
-                        chan[i].list_info = 0xFFFFFFFF;
-                        update_list_time(
-                            cur_time,
-                            TREAD,
-                            &list_slot[i][list_info >> 16][list_info & 0xFFFF]);
+                        if (chan[i].op == OP_READ) {
+                            die_state[i][chan[i].die] = DIE_READ_WAIT;
+                            list_slot[i][chan[i].die].time =
+                                cur_time + TREAD;
+                            chan[i].state = CHAN_IDLE;
+                            chan[i].act = 0xFFF;
+                            chan[i].op = OP_READ;
+                            chan[i].die = -1;
+                        } else if (chan[i].op == OP_WRITE) {
+                            die_state[i][chan[i].die] = DIE_WRITE_DATA;
+                            chan[i].state = CHAN_DATA;
+                            chan[i].time = cur_time + DATA_TIME;
+                        } else {
+                            die_state[i][chan[i].die] = DIE_ERASE_WAIT;
+                            list_slot[i][chan[i].die].time =
+                                cur_time + TERASE;
+                            chan[i].state = CHAN_IDLE;
+                            chan[i].act = 0xFFF;
+                            chan[i].op = OP_READ;
+                            chan[i].die = -1;
+                        }
                     }
                     break;
                 case CHAN_DATA:
-                    if (get_time_us() >= chan[i].time) {
-                        map[chan[i].act] = 0;
+                    cur_time = get_time_us();
+                    if (cur_time >= chan[i].time) {
+                        if (chan[i].op == OP_READ) {
+                            map[chan[i].act] = 0;
+                            inflight_cmds--;
+                            total_cmd++;
+                            list_slot[i][chan[i].die].act = 0xFFF;
+                            die_state[i][chan[i].die] = DIE_IDLE;
+                        } else if (chan[i].op == OP_WRITE) {
+                            die_state[i][chan[i].die] = DIE_WRITE_WAIT;
+                            list_slot[i][chan[i].die].time =
+                                cur_time + TPROG;
+                        }
                         chan[i].act = 0xFFF;
                         chan[i].state = CHAN_IDLE;
-
-                        list_info = chan[i].list_info;
-                        list_slot[i][list_info >> 16][list_info & 0xFFFF].act =
-                            0xFFF;
-                        chan[i].list_info = 0xFFFFFFFF;
-
-                        total_cmd++;
+                        chan[i].op = OP_READ;
+                        chan[i].die = -1;
                     }
                     break;
                 default:
