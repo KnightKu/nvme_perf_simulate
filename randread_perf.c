@@ -59,6 +59,7 @@ enum DIE_STATE {
     DIE_CMD,
     DIE_READ_WAIT,
     DIE_READ_DATA,
+    DIE_WRITE_DATA_READY,
     DIE_WRITE_DATA,
     DIE_WRITE_WAIT,
     DIE_ERASE_WAIT,
@@ -263,6 +264,17 @@ int main() {
                                 can_break = 1;
                                 break;
                             }
+                            if (die_state[i][die] == DIE_WRITE_DATA_READY) {
+                                chan[i].state = CHAN_DATA;
+                                chan[i].time = cur_time + DATA_TIME;
+                                chan[i].act = list_slot[i][die].act;
+                                chan[i].op = OP_WRITE;
+                                chan[i].die = die;
+                                die_state[i][die] = DIE_WRITE_DATA;
+                                rr_die[i] = (die + 1) % DIE_PER_CHAN;
+                                can_break = 1;
+                                break;
+                            }
                         }
                     }
                     break;
@@ -278,9 +290,11 @@ int main() {
                             chan[i].op = OP_READ;
                             chan[i].die = -1;
                         } else if (chan[i].op == OP_WRITE) {
-                            die_state[i][chan[i].die] = DIE_WRITE_DATA;
-                            chan[i].state = CHAN_DATA;
-                            chan[i].time = cur_time + DATA_TIME;
+                            die_state[i][chan[i].die] = DIE_WRITE_DATA_READY;
+                            chan[i].state = CHAN_IDLE;
+                            chan[i].act = 0xFFF;
+                            chan[i].op = OP_READ;
+                            chan[i].die = -1;
                         } else {
                             die_state[i][chan[i].die] = DIE_ERASE_WAIT;
                             list_slot[i][chan[i].die].time =
