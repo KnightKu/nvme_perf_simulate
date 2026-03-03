@@ -265,11 +265,11 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->chan_speed = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "ecc_parity") == 0) {
         cfg->ecc_parity = (int)strtol(value, &end, 10);
-    } else if (strcmp(key, "tR") == 0) {
+    } else if (strcmp(key, "tr") == 0) {
         cfg->tR = (int)strtol(value, &end, 10);
-    } else if (strcmp(key, "tPROG") == 0) {
+    } else if (strcmp(key, "tprog") == 0) {
         cfg->tPROG = (int)strtol(value, &end, 10);
-    } else if (strcmp(key, "tERASE") == 0) {
+    } else if (strcmp(key, "terase") == 0) {
         cfg->tERASE = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "qd") == 0) {
         cfg->qd = (int)strtol(value, &end, 10);
