@@ -59,6 +59,7 @@ enum DIE_STATE {
     DIE_CMD,
     DIE_READ_WAIT,
     DIE_READ_DATA,
+    DIE_WRITE_DATA_READY,
     DIE_WRITE_DATA,
     DIE_WRITE_WAIT,
     DIE_ERASE_WAIT,
@@ -219,12 +220,13 @@ inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
 
     for (j = 0; j < DIE_PER_CHAN; j++) {
         int die = (rr_die[chan_id] + j) % DIE_PER_CHAN;
-        if (die_state[chan_id][die] == DIE_WRITE_DATA) {
+        if (die_state[chan_id][die] == DIE_WRITE_DATA_READY) {
             chan[chan_id].state = CHAN_DATA;
             chan[chan_id].time = cur_time + DATA_TIME;
             chan[chan_id].act = list_slot[chan_id][die].act;
             chan[chan_id].op = OP_WRITE;
             chan[chan_id].die = die;
+            die_state[chan_id][die] = DIE_WRITE_DATA;
             rr_die[chan_id] = (die + 1) % DIE_PER_CHAN;
             return 1;
         }
@@ -346,7 +348,7 @@ int main() {
                             chan[i].op = OP_READ;
                             chan[i].die = -1;
                         } else if (chan[i].op == OP_WRITE) {
-                            die_state[i][chan[i].die] = DIE_WRITE_DATA;
+                            die_state[i][chan[i].die] = DIE_WRITE_DATA_READY;
                             chan[i].state = CHAN_IDLE;
                             chan[i].act = 0xFFF;
                             chan[i].op = OP_READ;
