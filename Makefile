@@ -1,5 +1,5 @@
-TARGET := randread_perf
-SRCS := randread_perf.c
+TARGET := nvme_perf_model
+SRCS := main.c cmd_sched.c
 
 CXX ?= g++
 CXXFLAGS ?= -O2 -std=c++11 -Wall -Wextra
