@@ -1,46 +1,9 @@
+#include "cmd_sched.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
-#include <stdint.h>
-
-/***************************** Usage ***************************/
-// 1. Modify parameters in the following part.
-// 2. g++ randread_perf.c
-// 3. ./a.out (Take several seconds to finish)
-// Notice it only evaluates performance on (channel + NAND) side!!!
-// Need to consider internal bus/resource and PCIe limitation for product performance!!!
-/***************************************************************/
-
-/******************************* Parameters need to clarity ****************************************/
-#define CMD_OVERHEAD    ((double)1.7)   // Equivalent time in micro-seconds used for one cmd
-#define CHAN_SPEED      (2400)          // MT/s
-#define ECC_PARITY      (600)           // How many bytes used for LDPC parity in one 4KiB codeword
-#define tR              (40)            // tR in micro-seconds
-#define tPROG           (800)           // tPROG in micro-seconds
-#define tERASE          (3000)          // tERASE in micro-seconds
-#define QD              (512)           // How many ACT cmds used
-#define CHAN_NUM        (16)            // How many channels
-#define DIE_NUM         (128)           // Total die num
-#define PLANE           (4)             // How many planes in one die (Have not adapt 6 plane scenario)
-#define IWL_SLOT        (256)           // Max parallelism for IWL read (e.g., 256 for QLTC, 512 for Aspen, but it reduces with channel num)
-#define READ_RATIO      (100)           // Read ratio percentage
-#define WRITE_RATIO     (0)             // Write ratio percentage
-#define ERASE_RATIO     (0)             // Erase ratio percentage
-/***************************************************************************************************/
-
-// No need to change in genereal
-#define TIME_SCALE      (1000ULL)
-#define CMD_TIME        (CMD_OVERHEAD * TIME_SCALE)
-#define TREAD           (tR * TIME_SCALE)
-#define TPROG           (tPROG * TIME_SCALE)
-#define TERASE          (tERASE * TIME_SCALE)
-#define DATA_TIME       ((4096 + ECC_PARITY) * TIME_SCALE / CHAN_SPEED)
-#define SLOT            (IWL_SLOT)
-#define ELEMENT         (1 * 32 * 1024)
-#define SLOT_PER_DIE    (SLOT / DIE_NUM)
-#define CMD_CNT         (QD)
-#define DIE_PER_CHAN    (DIE_NUM / CHAN_NUM)
 
 enum CHAN_STATE {
     CHAN_IDLE,
@@ -67,7 +30,7 @@ enum DIE_STATE {
 
 struct timeval tv;
 
-inline uint64_t get_time_us() {
+static inline uint64_t get_time_us() {
     gettimeofday(&tv, NULL);
     return (tv.tv_sec * 1000000 + tv.tv_usec);
 }
@@ -89,18 +52,15 @@ typedef struct chan_s {
     uint64_t time;
 } chan_t;
 
-int map[CMD_CNT];
-int cmd_op[CMD_CNT];
-list_t list_slot[CHAN_NUM][DIE_PER_CHAN];
-int die_state[CHAN_NUM][DIE_PER_CHAN];
-int rr_die[CHAN_NUM];
-chan_t chan[CHAN_NUM];
+static int map[CMD_CNT];
+static int cmd_op[CMD_CNT];
+static list_t list_slot[CHAN_NUM][DIE_PER_CHAN];
+static int die_state[CHAN_NUM][DIE_PER_CHAN];
+static int rr_die[CHAN_NUM];
+static chan_t chan[CHAN_NUM];
 
-uint64_t total_active;
-uint64_t total_loops;
-
-inline void update_list_head(int chan, int die_in_chan, int act) {
-    list_t *list = &(list_slot[chan][die_in_chan]);
+static inline void update_list_head(int chan_id, int die_in_chan, int act) {
+    list_t *list = &(list_slot[chan_id][die_in_chan]);
     list->list[list->head] = act;
     list->head++;
     if (list->head == SLOT) {
@@ -111,7 +71,7 @@ inline void update_list_head(int chan, int die_in_chan, int act) {
     }
 }
 
-inline int pop_list(list_t *list) {
+static inline int pop_list(list_t *list) {
     int act = list->list[list->tail];
     list->tail++;
     if (list->tail == SLOT) {
@@ -123,14 +83,14 @@ inline int pop_list(list_t *list) {
     return act;
 }
 
-inline int peek_list(const list_t *list) {
+static inline int peek_list(const list_t *list) {
     if (list->empty) {
         return -1;
     }
     return list->list[list->tail];
 }
 
-inline int select_op() {
+static inline int select_op() {
     int total = READ_RATIO + WRITE_RATIO + ERASE_RATIO;
     int r = rand() % total;
     if (r < READ_RATIO) {
@@ -143,8 +103,9 @@ inline int select_op() {
     return OP_ERASE;
 }
 
-inline void complete_wait_ops(int chan_id, uint64_t cur_time, int *inflight_cmds,
-                              uint64_t *total_cmd) {
+static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
+                                     int *inflight_cmds,
+                                     uint64_t *total_cmd) {
     int j;
 
     for (j = 0; j < DIE_PER_CHAN; j++) {
@@ -162,7 +123,7 @@ inline void complete_wait_ops(int chan_id, uint64_t cur_time, int *inflight_cmds
     }
 }
 
-inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
+static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
     int j;
 
     for (j = 0; j < DIE_PER_CHAN; j++) {
@@ -194,7 +155,7 @@ inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
     return 0;
 }
 
-inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
+static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
     int j;
 
     for (j = 0; j < DIE_PER_CHAN; j++) {
@@ -215,7 +176,7 @@ inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
     return 0;
 }
 
-inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
+static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
     int j;
 
     for (j = 0; j < DIE_PER_CHAN; j++) {
@@ -235,21 +196,10 @@ inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
     return 0;
 }
 
-int main() {
+void perf_init(void) {
     int i, j;
-    uint64_t cur_time;
-    uint64_t total_cmd;
-    int act;
-    int tmp_cmd_cnt = 0;
-    int tmp;
-    uint64_t start_time;
-    uint64_t end_time;
-    int xor_ratio;
-    int inflight_cmds = 0;
 
     srand((unsigned)time(NULL));
-    total_active = 0;
-    total_loops = 0;
     if (READ_RATIO + WRITE_RATIO + ERASE_RATIO <= 0) {
         printf("Error ratios! total ratio must be positive\n");
         exit(1);
@@ -278,12 +228,43 @@ int main() {
         map[i] = 0;
         cmd_op[i] = OP_READ;
     }
+}
 
-    total_cmd = 0;
-    start_time = 0;
+int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
+    int i;
+    int act;
+    int tmp;
+
+    if (*inflight_cmds >= tmp_cmd_cnt) {
+        return 0;
+    }
+
+    for (i = 0; i < CMD_CNT; i++) {
+        if (map[i] == 0) {
+            act = i;
+            cmd_op[act] = select_op();
+            tmp = rand() % DIE_NUM;
+            update_list_head(tmp % CHAN_NUM, tmp / CHAN_NUM, act);
+            map[i] = 1;
+            (*inflight_cmds)++;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+void perf_run(perf_stats_t *stats) {
+    int i;
+    uint64_t cur_time;
+    uint64_t total_cmd = 0;
+    int tmp_cmd_cnt = 0;
+    int inflight_cmds = 0;
+    uint64_t start_time = 0;
+    uint64_t end_time = 0;
+
     while (1) {
         if (total_cmd > ELEMENT) {
-            // printf("Enough cmds have been executed!\n");
             break;
         }
         if (CMD_CNT >= 512) {
@@ -296,19 +277,7 @@ int main() {
             start_time = get_time_us();
         }
 
-        if (inflight_cmds < tmp_cmd_cnt) {
-            for (i = 0; i < CMD_CNT; i++) {
-                if (map[i] == 0) {
-                    act = i;
-                    cmd_op[act] = select_op();
-                    tmp = rand() % DIE_NUM;
-                    update_list_head(tmp % CHAN_NUM, tmp / CHAN_NUM, act);
-                    map[i] = 1;
-                    inflight_cmds++;
-                    break;
-                }
-            }
-        }
+        perf_gen_cmd(tmp_cmd_cnt, &inflight_cmds);
 
         for (i = 0; i < CHAN_NUM; i++) {
             switch (chan[i].state) {
@@ -390,12 +359,23 @@ int main() {
             }
         }
     }
-    end_time = get_time_us();
-    xor_ratio = (DIE_NUM > 64) ? 64 : DIE_NUM;
-    printf("Performance = %.2f IOPS\n",
-           (double)(total_cmd - CMD_CNT) * 1000000 /
-               ((end_time - start_time) / TIME_SCALE) *
-               ((double)xor_ratio - 1) / (double)xor_ratio);
 
-    return 0;
+    end_time = get_time_us();
+    if (stats) {
+        stats->total_cmd = total_cmd;
+        stats->start_time = start_time;
+        stats->end_time = end_time;
+    }
+}
+
+double perf_calc_iops(const perf_stats_t *stats) {
+    int xor_ratio = (DIE_NUM > 64) ? 64 : DIE_NUM;
+
+    if (!stats) {
+        return 0.0;
+    }
+
+    return (double)(stats->total_cmd - CMD_CNT) * 1000000 /
+           ((stats->end_time - stats->start_time) / TIME_SCALE) *
+           ((double)xor_ratio - 1) / (double)xor_ratio;
 }
