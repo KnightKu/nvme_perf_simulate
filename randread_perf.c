@@ -123,6 +123,13 @@ inline int pop_list(list_t *list) {
     return act;
 }
 
+inline int peek_list(const list_t *list) {
+    if (list->empty) {
+        return -1;
+    }
+    return list->list[list->tail];
+}
+
 inline int select_op() {
     int total = READ_RATIO + WRITE_RATIO + ERASE_RATIO;
     int r = rand() % total;
@@ -136,13 +143,104 @@ inline int select_op() {
     return OP_ERASE;
 }
 
+inline void complete_wait_ops(int chan_id, uint64_t cur_time, int *inflight_cmds,
+                              uint64_t *total_cmd) {
+    int j;
+
+    for (j = 0; j < DIE_PER_CHAN; j++) {
+        if ((die_state[chan_id][j] == DIE_WRITE_WAIT ||
+             die_state[chan_id][j] == DIE_ERASE_WAIT) &&
+            list_slot[chan_id][j].act != 0xFFF &&
+            cur_time >= list_slot[chan_id][j].time) {
+            int act = list_slot[chan_id][j].act;
+            list_slot[chan_id][j].act = 0xFFF;
+            die_state[chan_id][j] = DIE_IDLE;
+            map[act] = 0;
+            (*inflight_cmds)--;
+            (*total_cmd)++;
+        }
+    }
+}
+
+inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
+    int j;
+
+    for (j = 0; j < DIE_PER_CHAN; j++) {
+        int die = (rr_die[chan_id] + j) % DIE_PER_CHAN;
+        int act;
+
+        if (die_state[chan_id][die] != DIE_IDLE) {
+            continue;
+        }
+
+        act = peek_list(&list_slot[chan_id][die]);
+        if (act < 0 || cmd_op[act] != op) {
+            continue;
+        }
+
+        act = pop_list(&list_slot[chan_id][die]);
+        list_slot[chan_id][die].act = act;
+        die_state[chan_id][die] = DIE_CMD;
+
+        chan[chan_id].state = CHAN_CMD;
+        chan[chan_id].time = cur_time + CMD_TIME;
+        chan[chan_id].act = act;
+        chan[chan_id].op = op;
+        chan[chan_id].die = die;
+        rr_die[chan_id] = (die + 1) % DIE_PER_CHAN;
+        return 1;
+    }
+
+    return 0;
+}
+
+inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
+    int j;
+
+    for (j = 0; j < DIE_PER_CHAN; j++) {
+        int die = (rr_die[chan_id] + j) % DIE_PER_CHAN;
+        if (die_state[chan_id][die] == DIE_READ_WAIT &&
+            cur_time >= list_slot[chan_id][die].time) {
+            chan[chan_id].state = CHAN_DATA;
+            chan[chan_id].time = cur_time + DATA_TIME;
+            chan[chan_id].act = list_slot[chan_id][die].act;
+            chan[chan_id].op = OP_READ;
+            chan[chan_id].die = die;
+            die_state[chan_id][die] = DIE_READ_DATA;
+            rr_die[chan_id] = (die + 1) % DIE_PER_CHAN;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
+    int j;
+
+    for (j = 0; j < DIE_PER_CHAN; j++) {
+        int die = (rr_die[chan_id] + j) % DIE_PER_CHAN;
+        if (die_state[chan_id][die] == DIE_WRITE_DATA_READY) {
+            chan[chan_id].state = CHAN_DATA;
+            chan[chan_id].time = cur_time + DATA_TIME;
+            chan[chan_id].act = list_slot[chan_id][die].act;
+            chan[chan_id].op = OP_WRITE;
+            chan[chan_id].die = die;
+            die_state[chan_id][die] = DIE_WRITE_DATA;
+            rr_die[chan_id] = (die + 1) % DIE_PER_CHAN;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 int main() {
     int i, j;
     uint64_t cur_time;
     uint64_t total_cmd;
     int act;
     int tmp_cmd_cnt = 0;
-    int can_break;
     int tmp;
     uint64_t start_time;
     uint64_t end_time;
@@ -215,68 +313,28 @@ int main() {
         for (i = 0; i < CHAN_NUM; i++) {
             switch (chan[i].state) {
                 case CHAN_IDLE:
-                    can_break = 0;
                     cur_time = get_time_us();
-                    for (j = 0; j < DIE_PER_CHAN; j++) {
-                        if ((die_state[i][j] == DIE_WRITE_WAIT ||
-                             die_state[i][j] == DIE_ERASE_WAIT) &&
-                            list_slot[i][j].act != 0xFFF &&
-                            cur_time >= list_slot[i][j].time) {
-                            act = list_slot[i][j].act;
-                            list_slot[i][j].act = 0xFFF;
-                            die_state[i][j] = DIE_IDLE;
-                            map[act] = 0;
-                            inflight_cmds--;
-                            total_cmd++;
-                        }
+                    complete_wait_ops(i, cur_time, &inflight_cmds, &total_cmd);
+
+                    // Follow the flowchart priority:
+                    // Read (cmd -> data), then Program (data -> cmd), then Erase (cmd).
+                    if (try_schedule_cmd(i, cur_time, OP_READ)) {
+                        break;
                     }
 
-                    for (j = 0; j < DIE_PER_CHAN; j++) {
-                        int die = (rr_die[i] + j) % DIE_PER_CHAN;
-                        if (die_state[i][die] == DIE_IDLE &&
-                            list_slot[i][die].empty == 0) {
-                            act = pop_list(&list_slot[i][die]);
-                            list_slot[i][die].act = act;
-                            die_state[i][die] = DIE_CMD;
-                            chan[i].state = CHAN_CMD;
-                            chan[i].time = cur_time + CMD_TIME;
-                            chan[i].act = act;
-                            chan[i].op = cmd_op[act];
-                            chan[i].die = die;
-                            rr_die[i] = (die + 1) % DIE_PER_CHAN;
-                            can_break = 1;
-                            break;
-                        }
+                    if (try_schedule_read_data(i, cur_time)) {
+                        break;
                     }
 
-                    if (can_break == 0) {
-                        for (j = 0; j < DIE_PER_CHAN; j++) {
-                            int die = (rr_die[i] + j) % DIE_PER_CHAN;
-                            if (die_state[i][die] == DIE_READ_WAIT &&
-                                cur_time >= list_slot[i][die].time) {
-                                chan[i].state = CHAN_DATA;
-                                chan[i].time = cur_time + DATA_TIME;
-                                chan[i].act = list_slot[i][die].act;
-                                chan[i].op = OP_READ;
-                                chan[i].die = die;
-                                die_state[i][die] = DIE_READ_DATA;
-                                rr_die[i] = (die + 1) % DIE_PER_CHAN;
-                                can_break = 1;
-                                break;
-                            }
-                            if (die_state[i][die] == DIE_WRITE_DATA_READY) {
-                                chan[i].state = CHAN_DATA;
-                                chan[i].time = cur_time + DATA_TIME;
-                                chan[i].act = list_slot[i][die].act;
-                                chan[i].op = OP_WRITE;
-                                chan[i].die = die;
-                                die_state[i][die] = DIE_WRITE_DATA;
-                                rr_die[i] = (die + 1) % DIE_PER_CHAN;
-                                can_break = 1;
-                                break;
-                            }
-                        }
+                    if (try_schedule_write_data(i, cur_time)) {
+                        break;
                     }
+
+                    if (try_schedule_cmd(i, cur_time, OP_WRITE)) {
+                        break;
+                    }
+
+                    (void)try_schedule_cmd(i, cur_time, OP_ERASE);
                     break;
                 case CHAN_CMD:
                     cur_time = get_time_us();
