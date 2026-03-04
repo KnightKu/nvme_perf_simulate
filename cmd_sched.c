@@ -540,8 +540,7 @@ void perf_run(perf_stats_t *stats) {
                     complete_wait_ops(i, cur_time, &inflight_cmds, &total_cmd,
                                       &write_cmd, &erase_cmd);
 
-                    // Follow the flowchart priority:
-                    // Read (cmd -> data), then Program (data -> cmd), then Erase (cmd).
+                    // Priority: read cmd, read data, write/erase cmds, then write data.
                     if (try_schedule_cmd(i, cur_time, OP_READ)) {
                         break;
                     }
@@ -550,15 +549,15 @@ void perf_run(perf_stats_t *stats) {
                         break;
                     }
 
-                    if (try_schedule_write_data(i, cur_time)) {
-                        break;
-                    }
-
                     if (try_schedule_cmd(i, cur_time, OP_WRITE)) {
                         break;
                     }
 
-                    (void)try_schedule_cmd(i, cur_time, OP_ERASE);
+                    if (try_schedule_cmd(i, cur_time, OP_ERASE)) {
+                        break;
+                    }
+
+                    (void)try_schedule_write_data(i, cur_time);
                     break;
                 case CHAN_CMD:
                     cur_time = get_time_us();
