@@ -27,6 +27,9 @@ enum CMD_PRIO {
     PRIO_MAX,
 };
 
+#define MAX_SUSPEND_WRITE 8
+#define MAX_SUSPEND_ERASE 15
+
 enum DIE_STATE {
     DIE_IDLE,
     DIE_CMD,
@@ -57,6 +60,11 @@ typedef struct die_ctx_s {
     int act;
     uint64_t time;
     queue_t q[PRIO_MAX][OP_MAX];
+    int suspended_act;
+    int suspended_op;
+    uint64_t suspended_time;
+    int suspend_write_cnt;
+    int suspend_erase_cnt;
 } die_ctx_t;
 
 typedef struct chan_s {
@@ -201,15 +209,42 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
             int act;
             die_ctx_t *ctx;
             queue_t *q;
-
-            if (*die_state_at(chan_id, die) != DIE_IDLE) {
-                continue;
-            }
+            int state;
 
             ctx = die_ctx_at(chan_id, die);
             q = &ctx->q[prio][op];
             if (q->empty) {
                 continue;
+            }
+
+            state = *die_state_at(chan_id, die);
+            if (state != DIE_IDLE) {
+                if (op != OP_READ) {
+                    continue;
+                }
+                if (state != DIE_WRITE_WAIT && state != DIE_ERASE_WAIT) {
+                    continue;
+                }
+                if (state == DIE_WRITE_WAIT &&
+                    ctx->suspend_write_cnt >= MAX_SUSPEND_WRITE) {
+                    continue;
+                }
+                if (state == DIE_ERASE_WAIT &&
+                    ctx->suspend_erase_cnt >= MAX_SUSPEND_ERASE) {
+                    continue;
+                }
+                if (ctx->time <= cur_time) {
+                    continue;
+                }
+                ctx->suspended_act = ctx->act;
+                ctx->suspended_op = (state == DIE_WRITE_WAIT) ? OP_WRITE
+                                                              : OP_ERASE;
+                ctx->suspended_time = ctx->time - cur_time;
+                if (state == DIE_WRITE_WAIT) {
+                    ctx->suspend_write_cnt++;
+                } else {
+                    ctx->suspend_erase_cnt++;
+                }
             }
 
             act = queue_pop(q);
@@ -478,6 +513,11 @@ int perf_init(const perf_config_t *cfg) {
             die_ctx_t *ctx = die_ctx_at(i, j);
             ctx->act = 0xFFF;
             ctx->time = 0;
+            ctx->suspended_act = 0xFFF;
+            ctx->suspended_op = OP_MAX;
+            ctx->suspended_time = 0;
+            ctx->suspend_write_cnt = 0;
+            ctx->suspend_erase_cnt = 0;
             for (prio = 0; prio < PRIO_MAX; prio++) {
                 for (op = 0; op < OP_MAX; op++) {
                     queue_init(&ctx->q[prio][op], cfg->iwl_slot);
@@ -666,12 +706,26 @@ void perf_run(perf_stats_t *stats) {
                     cur_time = get_time_us();
                     if (cur_time >= g_state.chan[i].time) {
                         if (g_state.chan[i].op == OP_READ) {
+                            die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             g_state.map[g_state.chan[i].act] = 0;
                             inflight_cmds--;
                             total_cmd++;
                             read_cmd++;
-                            die_ctx_at(i, g_state.chan[i].die)->act = 0xFFF;
-                            *die_state_at(i, g_state.chan[i].die) = DIE_IDLE;
+                            if (ctx->suspended_op != OP_MAX) {
+                                ctx->act = ctx->suspended_act;
+                                ctx->time = cur_time + ctx->suspended_time;
+                                *die_state_at(i, g_state.chan[i].die) =
+                                    (ctx->suspended_op == OP_WRITE)
+                                        ? DIE_WRITE_WAIT
+                                        : DIE_ERASE_WAIT;
+                                ctx->suspended_act = 0xFFF;
+                                ctx->suspended_op = OP_MAX;
+                                ctx->suspended_time = 0;
+                            } else {
+                                ctx->act = 0xFFF;
+                                *die_state_at(i, g_state.chan[i].die) =
+                                    DIE_IDLE;
+                            }
                         } else if (g_state.chan[i].op == OP_WRITE) {
                             *die_state_at(i, g_state.chan[i].die) =
                                 DIE_WRITE_WAIT;
