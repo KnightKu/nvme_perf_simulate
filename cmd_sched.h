@@ -21,6 +21,9 @@ typedef struct perf_config {
     int read_ratio;
     int write_ratio;
     int erase_ratio;
+    int prio_high_ratio;
+    int prio_normal_ratio;
+    int prio_low_ratio;
     uint64_t element;
 } perf_config_t;
 
