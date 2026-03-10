@@ -17,6 +17,14 @@ enum OP_TYPE {
     OP_READ,
     OP_WRITE,
     OP_ERASE,
+    OP_MAX,
+};
+
+enum CMD_PRIO {
+    PRIO_HIGH,
+    PRIO_NORMAL,
+    PRIO_LOW,
+    PRIO_MAX,
 };
 
 enum DIE_STATE {
@@ -37,14 +45,19 @@ static inline uint64_t get_time_us() {
     return (tv.tv_sec * 1000000 + tv.tv_usec);
 }
 
-typedef struct list_s {
+typedef struct queue_s {
     int head;
     int tail;
-    int act;
     int empty;
+    int size;
     int *list;
+} queue_t;
+
+typedef struct die_ctx_s {
+    int act;
     uint64_t time;
-} list_t;
+    queue_t q[PRIO_MAX][OP_MAX];
+} die_ctx_t;
 
 typedef struct chan_s {
     int state;
@@ -68,7 +81,8 @@ typedef struct perf_state {
     perf_derived_t d;
     int *map;
     int *cmd_op;
-    list_t *list_slot;
+    int *cmd_prio;
+    die_ctx_t *die_ctx;
     int *die_state;
     int *rr_die;
     chan_t *chan;
@@ -77,43 +91,43 @@ typedef struct perf_state {
 
 static perf_state_t g_state;
 
-static inline list_t *list_at(int chan_id, int die) {
-    return &g_state.list_slot[chan_id * g_state.d.die_per_chan + die];
+static inline die_ctx_t *die_ctx_at(int chan_id, int die) {
+    return &g_state.die_ctx[chan_id * g_state.d.die_per_chan + die];
 }
 
 static inline int *die_state_at(int chan_id, int die) {
     return &g_state.die_state[chan_id * g_state.d.die_per_chan + die];
 }
 
-static inline void update_list_head(int chan_id, int die_in_chan, int act) {
-    list_t *list = list_at(chan_id, die_in_chan);
-    list->list[list->head] = act;
-    list->head++;
-    if (list->head == g_state.cfg.iwl_slot) {
-        list->head = 0;
+static inline void queue_init(queue_t *q, int size) {
+    q->head = 0;
+    q->tail = 0;
+    q->empty = 1;
+    q->size = size;
+    q->list = (int *)calloc(size, sizeof(int));
+}
+
+static inline void queue_push(queue_t *q, int act) {
+    q->list[q->head] = act;
+    q->head++;
+    if (q->head == q->size) {
+        q->head = 0;
     }
-    if (list->head != list->tail) {
-        list->empty = 0;
+    if (q->head != q->tail) {
+        q->empty = 0;
     }
 }
 
-static inline int pop_list(list_t *list) {
-    int act = list->list[list->tail];
-    list->tail++;
-    if (list->tail == g_state.cfg.iwl_slot) {
-        list->tail = 0;
+static inline int queue_pop(queue_t *q) {
+    int act = q->list[q->tail];
+    q->tail++;
+    if (q->tail == q->size) {
+        q->tail = 0;
     }
-    if (list->head == list->tail) {
-        list->empty = 1;
+    if (q->head == q->tail) {
+        q->empty = 1;
     }
     return act;
-}
-
-static inline int peek_list(const list_t *list) {
-    if (list->empty) {
-        return -1;
-    }
-    return list->list[list->tail];
 }
 
 static inline int select_op() {
@@ -130,6 +144,26 @@ static inline int select_op() {
     return OP_ERASE;
 }
 
+static inline int select_prio() {
+    int total = g_state.cfg.prio_high_ratio + g_state.cfg.prio_normal_ratio +
+                g_state.cfg.prio_low_ratio;
+    int r = rand() % total;
+    if (r < g_state.cfg.prio_high_ratio) {
+        return PRIO_HIGH;
+    }
+    r -= g_state.cfg.prio_high_ratio;
+    if (r < g_state.cfg.prio_normal_ratio) {
+        return PRIO_NORMAL;
+    }
+    return PRIO_LOW;
+}
+
+static inline void enqueue_cmd(int chan_id, int die_in_chan, int op, int prio,
+                               int act) {
+    die_ctx_t *ctx = die_ctx_at(chan_id, die_in_chan);
+    queue_push(&ctx->q[prio][op], act);
+}
+
 static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
                                      int *inflight_cmds,
                                      uint64_t *total_cmd,
@@ -139,11 +173,11 @@ static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
         int state = *die_state_at(chan_id, j);
-        list_t *list = list_at(chan_id, j);
+        die_ctx_t *ctx = die_ctx_at(chan_id, j);
         if ((state == DIE_WRITE_WAIT || state == DIE_ERASE_WAIT) &&
-            list->act != 0xFFF && cur_time >= list->time) {
-            int act = list->act;
-            list->act = 0xFFF;
+            ctx->act != 0xFFF && cur_time >= ctx->time) {
+            int act = ctx->act;
+            ctx->act = 0xFFF;
             *die_state_at(chan_id, j) = DIE_IDLE;
             g_state.map[act] = 0;
             (*inflight_cmds)--;
@@ -158,32 +192,38 @@ static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
 }
 
 static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
+    int prio;
     int j;
 
-    for (j = 0; j < g_state.d.die_per_chan; j++) {
-        int die = (g_state.rr_die[chan_id] + j) % g_state.d.die_per_chan;
-        int act;
+    for (prio = PRIO_HIGH; prio < PRIO_MAX; prio++) {
+        for (j = 0; j < g_state.d.die_per_chan; j++) {
+            int die = (g_state.rr_die[chan_id] + j) % g_state.d.die_per_chan;
+            int act;
+            die_ctx_t *ctx;
+            queue_t *q;
 
-        if (*die_state_at(chan_id, die) != DIE_IDLE) {
-            continue;
+            if (*die_state_at(chan_id, die) != DIE_IDLE) {
+                continue;
+            }
+
+            ctx = die_ctx_at(chan_id, die);
+            q = &ctx->q[prio][op];
+            if (q->empty) {
+                continue;
+            }
+
+            act = queue_pop(q);
+            ctx->act = act;
+            *die_state_at(chan_id, die) = DIE_CMD;
+
+            g_state.chan[chan_id].state = CHAN_CMD;
+            g_state.chan[chan_id].time = cur_time + g_state.d.cmd_time;
+            g_state.chan[chan_id].act = act;
+            g_state.chan[chan_id].op = op;
+            g_state.chan[chan_id].die = die;
+            g_state.rr_die[chan_id] = (die + 1) % g_state.d.die_per_chan;
+            return 1;
         }
-
-        act = peek_list(list_at(chan_id, die));
-        if (act < 0 || g_state.cmd_op[act] != op) {
-            continue;
-        }
-
-        act = pop_list(list_at(chan_id, die));
-        list_at(chan_id, die)->act = act;
-        *die_state_at(chan_id, die) = DIE_CMD;
-
-        g_state.chan[chan_id].state = CHAN_CMD;
-        g_state.chan[chan_id].time = cur_time + g_state.d.cmd_time;
-        g_state.chan[chan_id].act = act;
-        g_state.chan[chan_id].op = op;
-        g_state.chan[chan_id].die = die;
-        g_state.rr_die[chan_id] = (die + 1) % g_state.d.die_per_chan;
-        return 1;
     }
 
     return 0;
@@ -194,11 +234,12 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
         int die = (g_state.rr_die[chan_id] + j) % g_state.d.die_per_chan;
+        die_ctx_t *ctx = die_ctx_at(chan_id, die);
         if (*die_state_at(chan_id, die) == DIE_READ_WAIT &&
-            cur_time >= list_at(chan_id, die)->time) {
+            cur_time >= ctx->time) {
             g_state.chan[chan_id].state = CHAN_DATA;
             g_state.chan[chan_id].time = cur_time + g_state.d.data_time;
-            g_state.chan[chan_id].act = list_at(chan_id, die)->act;
+            g_state.chan[chan_id].act = ctx->act;
             g_state.chan[chan_id].op = OP_READ;
             g_state.chan[chan_id].die = die;
             *die_state_at(chan_id, die) = DIE_READ_DATA;
@@ -215,10 +256,11 @@ static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
         int die = (g_state.rr_die[chan_id] + j) % g_state.d.die_per_chan;
+        die_ctx_t *ctx = die_ctx_at(chan_id, die);
         if (*die_state_at(chan_id, die) == DIE_WRITE_DATA_READY) {
             g_state.chan[chan_id].state = CHAN_DATA;
             g_state.chan[chan_id].time = cur_time + g_state.d.data_time;
-            g_state.chan[chan_id].act = list_at(chan_id, die)->act;
+            g_state.chan[chan_id].act = ctx->act;
             g_state.chan[chan_id].op = OP_WRITE;
             g_state.chan[chan_id].die = die;
             *die_state_at(chan_id, die) = DIE_WRITE_DATA;
@@ -252,6 +294,9 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->read_ratio = 100;
     cfg->write_ratio = 0;
     cfg->erase_ratio = 0;
+    cfg->prio_high_ratio = 0;
+    cfg->prio_normal_ratio = 100;
+    cfg->prio_low_ratio = 0;
     cfg->element = (uint64_t)(1 * 32 * 1024);
 }
 
@@ -287,6 +332,12 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->write_ratio = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "erase_ratio") == 0) {
         cfg->erase_ratio = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "prio_high_ratio") == 0) {
+        cfg->prio_high_ratio = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "prio_normal_ratio") == 0) {
+        cfg->prio_normal_ratio = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "prio_low_ratio") == 0) {
+        cfg->prio_low_ratio = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "element") == 0) {
         cfg->element = (uint64_t)strtoull(value, &end, 10);
     } else {
@@ -385,6 +436,11 @@ int perf_init(const perf_config_t *cfg) {
     if (cfg->read_ratio + cfg->write_ratio + cfg->erase_ratio <= 0) {
         return -1;
     }
+    if (cfg->prio_high_ratio + cfg->prio_normal_ratio +
+            cfg->prio_low_ratio <=
+        0) {
+        return -1;
+    }
 
     memset(&g_state, 0, sizeof(g_state));
     g_state.cfg = *cfg;
@@ -398,15 +454,17 @@ int perf_init(const perf_config_t *cfg) {
 
     g_state.map = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_op = (int *)calloc(cfg->qd, sizeof(int));
-    g_state.list_slot =
-        (list_t *)calloc(cfg->chan_num * g_state.d.die_per_chan, sizeof(list_t));
+    g_state.cmd_prio = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.die_ctx = (die_ctx_t *)calloc(
+        cfg->chan_num * g_state.d.die_per_chan, sizeof(die_ctx_t));
     g_state.die_state =
         (int *)calloc(cfg->chan_num * g_state.d.die_per_chan, sizeof(int));
     g_state.rr_die = (int *)calloc(cfg->chan_num, sizeof(int));
     g_state.chan = (chan_t *)calloc(cfg->chan_num, sizeof(chan_t));
 
-    if (!g_state.map || !g_state.cmd_op || !g_state.list_slot ||
-        !g_state.die_state || !g_state.rr_die || !g_state.chan) {
+    if (!g_state.map || !g_state.cmd_op || !g_state.cmd_prio ||
+        !g_state.die_ctx || !g_state.die_state || !g_state.rr_die ||
+        !g_state.chan) {
         perf_cleanup();
         return -1;
     }
@@ -415,16 +473,19 @@ int perf_init(const perf_config_t *cfg) {
 
     for (i = 0; i < cfg->chan_num; i++) {
         for (j = 0; j < g_state.d.die_per_chan; j++) {
-            list_t *list = list_at(i, j);
-            list->head = 0;
-            list->tail = 0;
-            list->act = 0xFFF;
-            list->empty = 1;
-            list->time = 0;
-            list->list = (int *)calloc(cfg->iwl_slot, sizeof(int));
-            if (!list->list) {
-                perf_cleanup();
-                return -1;
+            int prio;
+            int op;
+            die_ctx_t *ctx = die_ctx_at(i, j);
+            ctx->act = 0xFFF;
+            ctx->time = 0;
+            for (prio = 0; prio < PRIO_MAX; prio++) {
+                for (op = 0; op < OP_MAX; op++) {
+                    queue_init(&ctx->q[prio][op], cfg->iwl_slot);
+                    if (!ctx->q[prio][op].list) {
+                        perf_cleanup();
+                        return -1;
+                    }
+                }
             }
             *die_state_at(i, j) = DIE_IDLE;
         }
@@ -441,6 +502,7 @@ int perf_init(const perf_config_t *cfg) {
     for (i = 0; i < cfg->qd; i++) {
         g_state.map[i] = 0;
         g_state.cmd_op[i] = OP_READ;
+        g_state.cmd_prio[i] = PRIO_NORMAL;
     }
 
     g_state.initialized = 1;
@@ -451,20 +513,27 @@ void perf_cleanup(void) {
     int i;
     int j;
 
-    if (g_state.list_slot && g_state.d.die_per_chan > 0 &&
+    if (g_state.die_ctx && g_state.d.die_per_chan > 0 &&
         g_state.cfg.chan_num > 0) {
         for (i = 0; i < g_state.cfg.chan_num; i++) {
             for (j = 0; j < g_state.d.die_per_chan; j++) {
-                list_t *list = list_at(i, j);
-                free(list->list);
-                list->list = NULL;
+                int prio;
+                int op;
+                die_ctx_t *ctx = die_ctx_at(i, j);
+                for (prio = 0; prio < PRIO_MAX; prio++) {
+                    for (op = 0; op < OP_MAX; op++) {
+                        free(ctx->q[prio][op].list);
+                        ctx->q[prio][op].list = NULL;
+                    }
+                }
             }
         }
     }
 
     free(g_state.map);
     free(g_state.cmd_op);
-    free(g_state.list_slot);
+    free(g_state.cmd_prio);
+    free(g_state.die_ctx);
     free(g_state.die_state);
     free(g_state.rr_die);
     free(g_state.chan);
@@ -487,11 +556,14 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
 
     for (i = 0; i < g_state.cfg.qd; i++) {
         if (g_state.map[i] == 0) {
+            int op = select_op();
+            int prio = select_prio();
             act = i;
-            g_state.cmd_op[act] = select_op();
+            g_state.cmd_op[act] = op;
+            g_state.cmd_prio[act] = prio;
             tmp = rand() % g_state.cfg.die_num;
-            update_list_head(tmp % g_state.cfg.chan_num,
-                             tmp / g_state.cfg.chan_num, act);
+            enqueue_cmd(tmp % g_state.cfg.chan_num,
+                        tmp / g_state.cfg.chan_num, op, prio, act);
             g_state.map[i] = 1;
             (*inflight_cmds)++;
             return 1;
@@ -565,7 +637,7 @@ void perf_run(perf_stats_t *stats) {
                         if (g_state.chan[i].op == OP_READ) {
                             *die_state_at(i, g_state.chan[i].die) =
                                 DIE_READ_WAIT;
-                            list_at(i, g_state.chan[i].die)->time =
+                            die_ctx_at(i, g_state.chan[i].die)->time =
                                 cur_time + g_state.d.tread;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
@@ -581,7 +653,7 @@ void perf_run(perf_stats_t *stats) {
                         } else {
                             *die_state_at(i, g_state.chan[i].die) =
                                 DIE_ERASE_WAIT;
-                            list_at(i, g_state.chan[i].die)->time =
+                            die_ctx_at(i, g_state.chan[i].die)->time =
                                 cur_time + g_state.d.terase;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
@@ -598,12 +670,12 @@ void perf_run(perf_stats_t *stats) {
                             inflight_cmds--;
                             total_cmd++;
                             read_cmd++;
-                            list_at(i, g_state.chan[i].die)->act = 0xFFF;
+                            die_ctx_at(i, g_state.chan[i].die)->act = 0xFFF;
                             *die_state_at(i, g_state.chan[i].die) = DIE_IDLE;
                         } else if (g_state.chan[i].op == OP_WRITE) {
                             *die_state_at(i, g_state.chan[i].die) =
                                 DIE_WRITE_WAIT;
-                            list_at(i, g_state.chan[i].die)->time =
+                            die_ctx_at(i, g_state.chan[i].die)->time =
                                 cur_time + g_state.d.tprog;
                         }
                         g_state.chan[i].act = 0xFFF;
