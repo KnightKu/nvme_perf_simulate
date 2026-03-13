@@ -29,7 +29,8 @@ Erase IOPS = <erase_iops>
 **时序/性能参数**
 - `cmd_overhead`：单条 cmd 等效耗时（微秒）
 - `chan_speed`：channel 速率（MT/s）
-- `ecc_parity`：每 4KiB codeword 的 ECC 开销（字节）
+- `cmd_size`：单次 data 传输的 cmd 大小（字节）
+- `ecc_parity_size`：ECC parity 大小（字节）
 - `tr`：读 tR（微秒）
 - `tprog`：写 tPROG（微秒）
 - `terase`：擦 tERASE（微秒）
@@ -56,7 +57,8 @@ Erase IOPS = <erase_iops>
 ```ini
 cmd_overhead=1.7
 chan_speed=2400
-ecc_parity=600
+cmd_size=4096
+ecc_parity_size=600
 tr=40
 tprog=800
 terase=3000

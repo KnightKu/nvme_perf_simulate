@@ -317,7 +317,8 @@ void perf_config_defaults(perf_config_t *cfg) {
     }
     cfg->cmd_overhead = 1.7;
     cfg->chan_speed = 2400;
-    cfg->ecc_parity = 600;
+    cfg->cmd_size = 4096;
+    cfg->ecc_parity_size = 600;
     cfg->tR = 40;
     cfg->tPROG = 800;
     cfg->tERASE = 3000;
@@ -343,8 +344,12 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->cmd_overhead = strtod(value, &end);
     } else if (strcmp(key, "chan_speed") == 0) {
         cfg->chan_speed = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "cmd_size") == 0) {
+        cfg->cmd_size = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "ecc_parity_size") == 0) {
+        cfg->ecc_parity_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "ecc_parity") == 0) {
-        cfg->ecc_parity = (int)strtol(value, &end, 10);
+        cfg->ecc_parity_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "tr") == 0) {
         cfg->tR = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "tprog") == 0) {
@@ -460,7 +465,8 @@ int perf_init(const perf_config_t *cfg) {
     }
 
     if (cfg->chan_num <= 0 || cfg->die_num <= 0 || cfg->qd <= 0 ||
-        cfg->iwl_slot <= 0 || cfg->chan_speed <= 0) {
+        cfg->iwl_slot <= 0 || cfg->chan_speed <= 0 || cfg->cmd_size <= 0 ||
+        cfg->ecc_parity_size < 0) {
         return -1;
     }
 
@@ -485,7 +491,8 @@ int perf_init(const perf_config_t *cfg) {
     g_state.d.tprog = (uint64_t)cfg->tPROG * TIME_SCALE;
     g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
     g_state.d.data_time =
-        (uint64_t)((4096 + cfg->ecc_parity) * TIME_SCALE / cfg->chan_speed);
+        (uint64_t)(((uint64_t)cfg->cmd_size + (uint64_t)cfg->ecc_parity_size) *
+                   TIME_SCALE / cfg->chan_speed);
 
     g_state.map = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_op = (int *)calloc(cfg->qd, sizeof(int));

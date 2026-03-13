@@ -71,5 +71,6 @@ CMD -> 等 tERASE -> 完成
 
 ## 7. 时间模型
 全部时序基于配置：
-- `cmd_overhead`、`tr`、`tprog`、`terase`、`chan_speed`、`ecc_parity`
+- `cmd_overhead`、`tr`、`tprog`、`terase`、`chan_speed`、`cmd_size`、
+  `ecc_parity_size`
 - 统一以微秒计时
