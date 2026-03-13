@@ -316,6 +316,8 @@ void perf_config_defaults(perf_config_t *cfg) {
         return;
     }
     cfg->cmd_overhead = 1.7;
+    cfg->cmd_overhead_sca = 1.7;
+    cfg->sca = 0;
     cfg->chan_speed = 2400;
     cfg->cmd_size = 4096;
     cfg->ecc_parity_size = 600;
@@ -343,6 +345,10 @@ static int set_config_value(perf_config_t *cfg, const char *key,
 
     if (strcmp(key, "cmd_overhead") == 0) {
         cfg->cmd_overhead = strtod(value, &end);
+    } else if (strcmp(key, "cmd_overhead_sca") == 0) {
+        cfg->cmd_overhead_sca = strtod(value, &end);
+    } else if (strcmp(key, "sca") == 0) {
+        cfg->sca = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "chan_speed") == 0) {
         cfg->chan_speed = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "cmd_size") == 0) {
@@ -489,7 +495,11 @@ int perf_init(const perf_config_t *cfg) {
     memset(&g_state, 0, sizeof(g_state));
     g_state.cfg = *cfg;
     g_state.d.die_per_chan = cfg->die_num / cfg->chan_num;
-    g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead * TIME_SCALE);
+    if (cfg->sca) {
+        g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead_sca * TIME_SCALE);
+    } else {
+        g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead * TIME_SCALE);
+    }
     if (cfg->cmd_size == 4096) {
         g_state.d.tread = (uint64_t)cfg->tr_fast * TIME_SCALE;
     } else {

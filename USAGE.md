@@ -28,6 +28,8 @@ Erase IOPS = <erase_iops>
 ## 4. 配置文件字段
 **时序/性能参数**
 - `cmd_overhead`：单条 cmd 等效耗时（微秒）
+- `cmd_overhead_sca`：SCA 模式下的 cmd 等效耗时（微秒）
+- `sca`：是否启用 SCA（0=关闭，1=开启）
 - `chan_speed`：channel 速率（MT/s）
 - `cmd_size`：单次 data 传输的 cmd 大小（字节）
 - `ecc_parity_size`：ECC parity 大小（字节）
@@ -57,6 +59,8 @@ Erase IOPS = <erase_iops>
 ## 5. 示例配置（默认 perf.conf）
 ```ini
 cmd_overhead=1.7
+cmd_overhead_sca=1.7
+sca=0
 chan_speed=2400
 cmd_size=4096
 ecc_parity_size=600

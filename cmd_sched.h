@@ -8,6 +8,8 @@
 
 typedef struct perf_config {
     double cmd_overhead;
+    double cmd_overhead_sca;
+    int sca;
     int chan_speed;
     int cmd_size;
     int ecc_parity_size;
