@@ -319,6 +319,7 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->chan_speed = 2400;
     cfg->cmd_size = 4096;
     cfg->ecc_parity_size = 600;
+    cfg->tr_fast = 40;
     cfg->tR = 40;
     cfg->tPROG = 800;
     cfg->tERASE = 3000;
@@ -350,6 +351,8 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->ecc_parity_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "ecc_parity") == 0) {
         cfg->ecc_parity_size = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "tr_fast") == 0) {
+        cfg->tr_fast = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "tr") == 0) {
         cfg->tR = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "tprog") == 0) {
@@ -487,7 +490,11 @@ int perf_init(const perf_config_t *cfg) {
     g_state.cfg = *cfg;
     g_state.d.die_per_chan = cfg->die_num / cfg->chan_num;
     g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead * TIME_SCALE);
-    g_state.d.tread = (uint64_t)cfg->tR * TIME_SCALE;
+    if (cfg->cmd_size == 4096) {
+        g_state.d.tread = (uint64_t)cfg->tr_fast * TIME_SCALE;
+    } else {
+        g_state.d.tread = (uint64_t)cfg->tR * TIME_SCALE;
+    }
     g_state.d.tprog = (uint64_t)cfg->tPROG * TIME_SCALE;
     g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
     g_state.d.data_time =

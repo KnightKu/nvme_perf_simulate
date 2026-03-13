@@ -31,6 +31,7 @@ Erase IOPS = <erase_iops>
 - `chan_speed`：channel 速率（MT/s）
 - `cmd_size`：单次 data 传输的 cmd 大小（字节）
 - `ecc_parity_size`：ECC parity 大小（字节）
+- `tr_fast`：当 cmd_size 为 4KiB 时的读 tR（微秒）
 - `tr`：读 tR（微秒）
 - `tprog`：写 tPROG（微秒）
 - `terase`：擦 tERASE（微秒）
@@ -59,6 +60,7 @@ cmd_overhead=1.7
 chan_speed=2400
 cmd_size=4096
 ecc_parity_size=600
+tr_fast=40
 tr=40
 tprog=800
 terase=3000

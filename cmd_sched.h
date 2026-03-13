@@ -11,6 +11,7 @@ typedef struct perf_config {
     int chan_speed;
     int cmd_size;
     int ecc_parity_size;
+    int tr_fast;
     int tR;
     int tPROG;
     int tERASE;
