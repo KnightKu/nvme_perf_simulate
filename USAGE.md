@@ -45,7 +45,7 @@ Erase IOPS = <erase_iops>
 - `qd`：队列深度
 - `chan_num`：channel 数量
 - `die_num`：die 总数
-- `plane`：die 内 plane 数（当前不参与调度计算）
+- `plane`：die 内 plane 数（用于并发 plane 限制）
 - `iwl_slot`：每 die 的队列容量
 
 **命令类型比例**
@@ -91,3 +91,5 @@ element=32768
 ## 6. 常见问题
 - **配置文件加载失败**：检查路径、权限与字段拼写（全部为小写）。
 - **输出 IOPS 为 0**：检查 `element`、`qd` 与比例字段是否合理。
+- **plane 并发限制异常**：当 `die_num * plane > iwl_slot` 时，
+  要求 `iwl_slot / die_num` 为 2 的幂且大于 0。

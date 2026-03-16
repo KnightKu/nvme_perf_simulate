@@ -75,3 +75,9 @@ CMD -> 等 tERASE -> 完成
   `nand_type`、`terase`、`chan_speed`、`cmd_size`、
   `ecc_parity_size`、`page_size`、`page_parity_size`
 - 统一以微秒计时
+
+## 8. Plane 并发限制
+- 总 plane 数 = `die_num * plane`
+- 当总 plane 数 > `iwl_slot` 时：
+  - 每 die 最大并发 plane 数 = `iwl_slot / die_num`
+  - 要求为 **2 的幂**
