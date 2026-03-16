@@ -13,6 +13,8 @@ typedef struct perf_config {
     int chan_speed;
     int cmd_size;          // data payload size in bytes
     int ecc_parity_size;   // ECC parity size in bytes
+    int page_size;         // page data size in bytes (write)
+    int page_parity_size;  // page parity size in bytes (write)
     int tr_fast;           // tR for 4KiB cmd_size
     int tR;
     int tPROG;

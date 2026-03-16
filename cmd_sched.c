@@ -82,7 +82,8 @@ typedef struct perf_derived {
     uint64_t tread;
     uint64_t tprog;
     uint64_t terase;
-    uint64_t data_time;
+    uint64_t data_time_read;
+    uint64_t data_time_write;
     int die_per_chan;
 } perf_derived_t;
 
@@ -276,7 +277,7 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
         if (*die_state_at(chan_id, die) == DIE_READ_WAIT &&
             cur_time >= ctx->time) {
             g_state.chan[chan_id].state = CHAN_DATA;
-            g_state.chan[chan_id].time = cur_time + g_state.d.data_time;
+            g_state.chan[chan_id].time = cur_time + g_state.d.data_time_read;
             g_state.chan[chan_id].act = ctx->act;
             g_state.chan[chan_id].op = OP_READ;
             g_state.chan[chan_id].die = die;
@@ -297,7 +298,7 @@ static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
         die_ctx_t *ctx = die_ctx_at(chan_id, die);
         if (*die_state_at(chan_id, die) == DIE_WRITE_DATA_READY) {
             g_state.chan[chan_id].state = CHAN_DATA;
-            g_state.chan[chan_id].time = cur_time + g_state.d.data_time;
+            g_state.chan[chan_id].time = cur_time + g_state.d.data_time_write;
             g_state.chan[chan_id].act = ctx->act;
             g_state.chan[chan_id].op = OP_WRITE;
             g_state.chan[chan_id].die = die;
@@ -324,6 +325,8 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->chan_speed = 2400;
     cfg->cmd_size = 4096;
     cfg->ecc_parity_size = 600;
+    cfg->page_size = 16384;
+    cfg->page_parity_size = 1952;
     cfg->tr_fast = 40;
     cfg->tR = 40;
     cfg->tPROG = 800;
@@ -358,6 +361,10 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->cmd_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "ecc_parity_size") == 0) {
         cfg->ecc_parity_size = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "page_size") == 0) {
+        cfg->page_size = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "page_parity_size") == 0) {
+        cfg->page_parity_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "ecc_parity") == 0) {
         cfg->ecc_parity_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "tr_fast") == 0) {
@@ -478,7 +485,8 @@ int perf_init(const perf_config_t *cfg) {
 
     if (cfg->chan_num <= 0 || cfg->die_num <= 0 || cfg->qd <= 0 ||
         cfg->iwl_slot <= 0 || cfg->chan_speed <= 0 || cfg->cmd_size <= 0 ||
-        cfg->ecc_parity_size < 0) {
+        cfg->page_size <= 0 || cfg->ecc_parity_size < 0 ||
+        cfg->page_parity_size < 0) {
         return -1;
     }
 
@@ -510,10 +518,14 @@ int perf_init(const perf_config_t *cfg) {
     }
     g_state.d.tprog = (uint64_t)cfg->tPROG * TIME_SCALE;
     g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
-    g_state.d.data_time =
+    g_state.d.data_time_read =
         (uint64_t)(((uint64_t)cfg->cmd_size + (uint64_t)cfg->ecc_parity_size) *
                    TIME_SCALE / cfg->chan_speed);
-    // data_time models payload + ECC parity transfer on channel.
+    g_state.d.data_time_write =
+        (uint64_t)(((uint64_t)cfg->page_size +
+                    (uint64_t)cfg->page_parity_size) *
+                   TIME_SCALE / cfg->chan_speed);
+    // data_time_* models payload + parity transfer on channel.
 
     g_state.map = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_op = (int *)calloc(cfg->qd, sizeof(int));
