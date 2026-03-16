@@ -330,7 +330,7 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->tr_fast = 40;
     cfg->tR = 40;
     cfg->tprog_eff = 800;
-    cfg->nand_type = 1;
+    cfg->nand_type = 3;
     cfg->tERASE = 3000;
     cfg->qd = 512;
     cfg->chan_num = 16;
