@@ -57,11 +57,18 @@ typedef struct queue_s {
     int *list;
 } queue_t;
 
-typedef struct die_ctx_s {
+typedef struct plane_slot_s {
+    int state;
     int act;
     uint64_t time;
+} plane_slot_t;
+
+typedef struct die_ctx_s {
     queue_t q[PRIO_MAX][OP_MAX];
+    plane_slot_t *slots;
+    int slot_count;
     // Suspended write/erase state for read preemption.
+    int suspended_slot;
     int suspended_act;
     int suspended_op;
     uint64_t suspended_time;
@@ -74,6 +81,7 @@ typedef struct chan_s {
     int act;
     int op;
     int die;
+    int slot;
     uint64_t time;
 } chan_t;
 
@@ -85,6 +93,7 @@ typedef struct perf_derived {
     uint64_t data_time_read;
     uint64_t data_time_write;
     int die_per_chan;
+    int max_planes_per_die;
 } perf_derived_t;
 
 typedef struct perf_state {
@@ -94,7 +103,6 @@ typedef struct perf_state {
     int *cmd_op;
     int *cmd_prio;
     die_ctx_t *die_ctx;
-    int *die_state;
     int *rr_die;
     chan_t *chan;
     int initialized;
@@ -106,8 +114,8 @@ static inline die_ctx_t *die_ctx_at(int chan_id, int die) {
     return &g_state.die_ctx[chan_id * g_state.d.die_per_chan + die];
 }
 
-static inline int *die_state_at(int chan_id, int die) {
-    return &g_state.die_state[chan_id * g_state.d.die_per_chan + die];
+static inline plane_slot_t *slot_at(die_ctx_t *ctx, int slot) {
+    return &ctx->slots[slot];
 }
 
 static inline void queue_init(queue_t *q, int size) {
@@ -139,6 +147,10 @@ static inline int queue_pop(queue_t *q) {
         q->empty = 1;
     }
     return act;
+}
+
+static inline int is_power_of_two(int value) {
+    return value > 0 && (value & (value - 1)) == 0;
 }
 
 static inline int select_op() {
@@ -183,20 +195,24 @@ static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
     int j;
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
-        int state = *die_state_at(chan_id, j);
+        int slot;
         die_ctx_t *ctx = die_ctx_at(chan_id, j);
-        if ((state == DIE_WRITE_WAIT || state == DIE_ERASE_WAIT) &&
-            ctx->act != 0xFFF && cur_time >= ctx->time) {
-            int act = ctx->act;
-            ctx->act = 0xFFF;
-            *die_state_at(chan_id, j) = DIE_IDLE;
-            g_state.map[act] = 0;
-            (*inflight_cmds)--;
-            (*total_cmd)++;
-            if (g_state.cmd_op[act] == OP_WRITE) {
-                (*write_cmd)++;
-            } else if (g_state.cmd_op[act] == OP_ERASE) {
-                (*erase_cmd)++;
+        for (slot = 0; slot < ctx->slot_count; slot++) {
+            plane_slot_t *ps = slot_at(ctx, slot);
+            if ((ps->state == DIE_WRITE_WAIT ||
+                 ps->state == DIE_ERASE_WAIT) &&
+                ps->act != 0xFFF && cur_time >= ps->time) {
+                int act = ps->act;
+                ps->act = 0xFFF;
+                ps->state = DIE_IDLE;
+                g_state.map[act] = 0;
+                (*inflight_cmds)--;
+                (*total_cmd)++;
+                if (g_state.cmd_op[act] == OP_WRITE) {
+                    (*write_cmd)++;
+                } else if (g_state.cmd_op[act] == OP_ERASE) {
+                    (*erase_cmd)++;
+                }
             }
         }
     }
@@ -213,7 +229,8 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
             int act;
             die_ctx_t *ctx;
             queue_t *q;
-            int state;
+            int slot = -1;
+            int s;
 
             ctx = die_ctx_at(chan_id, die);
             q = &ctx->q[prio][op];
@@ -221,45 +238,58 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
                 continue;
             }
 
-            state = *die_state_at(chan_id, die);
-            if (state != DIE_IDLE) {
-                if (op != OP_READ) {
-                    continue;
+            for (s = 0; s < ctx->slot_count; s++) {
+                if (slot_at(ctx, s)->state == DIE_IDLE) {
+                    slot = s;
+                    break;
                 }
-                if (state != DIE_WRITE_WAIT && state != DIE_ERASE_WAIT) {
-                    continue;
+            }
+            if (slot < 0 && op == OP_READ && ctx->suspended_op == OP_MAX) {
+                for (s = 0; s < ctx->slot_count; s++) {
+                    plane_slot_t *ps = slot_at(ctx, s);
+                    if ((ps->state == DIE_WRITE_WAIT ||
+                         ps->state == DIE_ERASE_WAIT) &&
+                        ps->time > cur_time) {
+                        if (ps->state == DIE_WRITE_WAIT &&
+                            ctx->suspend_write_cnt >= MAX_SUSPEND_WRITE) {
+                            continue;
+                        }
+                        if (ps->state == DIE_ERASE_WAIT &&
+                            ctx->suspend_erase_cnt >= MAX_SUSPEND_ERASE) {
+                            continue;
+                        }
+                        ctx->suspended_slot = s;
+                        ctx->suspended_act = ps->act;
+                        ctx->suspended_op =
+                            (ps->state == DIE_WRITE_WAIT) ? OP_WRITE
+                                                          : OP_ERASE;
+                        ctx->suspended_time = ps->time - cur_time;
+                        if (ps->state == DIE_WRITE_WAIT) {
+                            ctx->suspend_write_cnt++;
+                        } else {
+                            ctx->suspend_erase_cnt++;
+                        }
+                        ps->act = 0xFFF;
+                        ps->state = DIE_IDLE;
+                        slot = s;
+                        break;
+                    }
                 }
-                if (state == DIE_WRITE_WAIT &&
-                    ctx->suspend_write_cnt >= MAX_SUSPEND_WRITE) {
-                    continue;
-                }
-                if (state == DIE_ERASE_WAIT &&
-                    ctx->suspend_erase_cnt >= MAX_SUSPEND_ERASE) {
-                    continue;
-                }
-                if (ctx->time <= cur_time) {
-                    continue;
-                }
-                ctx->suspended_act = ctx->act;
-                ctx->suspended_op = (state == DIE_WRITE_WAIT) ? OP_WRITE
-                                                              : OP_ERASE;
-                ctx->suspended_time = ctx->time - cur_time;
-                if (state == DIE_WRITE_WAIT) {
-                    ctx->suspend_write_cnt++;
-                } else {
-                    ctx->suspend_erase_cnt++;
-                }
+            }
+            if (slot < 0) {
+                continue;
             }
 
             act = queue_pop(q);
-            ctx->act = act;
-            *die_state_at(chan_id, die) = DIE_CMD;
+            slot_at(ctx, slot)->act = act;
+            slot_at(ctx, slot)->state = DIE_CMD;
 
             g_state.chan[chan_id].state = CHAN_CMD;
             g_state.chan[chan_id].time = cur_time + g_state.d.cmd_time;
             g_state.chan[chan_id].act = act;
             g_state.chan[chan_id].op = op;
             g_state.chan[chan_id].die = die;
+            g_state.chan[chan_id].slot = slot;
             g_state.rr_die[chan_id] = (die + 1) % g_state.d.die_per_chan;
             return 1;
         }
@@ -273,17 +303,22 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
         int die = (g_state.rr_die[chan_id] + j) % g_state.d.die_per_chan;
+        int slot;
         die_ctx_t *ctx = die_ctx_at(chan_id, die);
-        if (*die_state_at(chan_id, die) == DIE_READ_WAIT &&
-            cur_time >= ctx->time) {
-            g_state.chan[chan_id].state = CHAN_DATA;
-            g_state.chan[chan_id].time = cur_time + g_state.d.data_time_read;
-            g_state.chan[chan_id].act = ctx->act;
-            g_state.chan[chan_id].op = OP_READ;
-            g_state.chan[chan_id].die = die;
-            *die_state_at(chan_id, die) = DIE_READ_DATA;
-            g_state.rr_die[chan_id] = (die + 1) % g_state.d.die_per_chan;
-            return 1;
+        for (slot = 0; slot < ctx->slot_count; slot++) {
+            plane_slot_t *ps = slot_at(ctx, slot);
+            if (ps->state == DIE_READ_WAIT && cur_time >= ps->time) {
+                g_state.chan[chan_id].state = CHAN_DATA;
+                g_state.chan[chan_id].time =
+                    cur_time + g_state.d.data_time_read;
+                g_state.chan[chan_id].act = ps->act;
+                g_state.chan[chan_id].op = OP_READ;
+                g_state.chan[chan_id].die = die;
+                g_state.chan[chan_id].slot = slot;
+                ps->state = DIE_READ_DATA;
+                g_state.rr_die[chan_id] = (die + 1) % g_state.d.die_per_chan;
+                return 1;
+            }
         }
     }
 
@@ -295,16 +330,22 @@ static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
         int die = (g_state.rr_die[chan_id] + j) % g_state.d.die_per_chan;
+        int slot;
         die_ctx_t *ctx = die_ctx_at(chan_id, die);
-        if (*die_state_at(chan_id, die) == DIE_WRITE_DATA_READY) {
-            g_state.chan[chan_id].state = CHAN_DATA;
-            g_state.chan[chan_id].time = cur_time + g_state.d.data_time_write;
-            g_state.chan[chan_id].act = ctx->act;
-            g_state.chan[chan_id].op = OP_WRITE;
-            g_state.chan[chan_id].die = die;
-            *die_state_at(chan_id, die) = DIE_WRITE_DATA;
-            g_state.rr_die[chan_id] = (die + 1) % g_state.d.die_per_chan;
-            return 1;
+        for (slot = 0; slot < ctx->slot_count; slot++) {
+            plane_slot_t *ps = slot_at(ctx, slot);
+            if (ps->state == DIE_WRITE_DATA_READY) {
+                g_state.chan[chan_id].state = CHAN_DATA;
+                g_state.chan[chan_id].time =
+                    cur_time + g_state.d.data_time_write;
+                g_state.chan[chan_id].act = ps->act;
+                g_state.chan[chan_id].op = OP_WRITE;
+                g_state.chan[chan_id].die = die;
+                g_state.chan[chan_id].slot = slot;
+                ps->state = DIE_WRITE_DATA;
+                g_state.rr_die[chan_id] = (die + 1) % g_state.d.die_per_chan;
+                return 1;
+            }
         }
     }
 
@@ -491,7 +532,7 @@ int perf_init(const perf_config_t *cfg) {
     if (cfg->chan_num <= 0 || cfg->die_num <= 0 || cfg->qd <= 0 ||
         cfg->iwl_slot <= 0 || cfg->chan_speed <= 0 || cfg->cmd_size <= 0 ||
         cfg->page_size <= 0 || cfg->ecc_parity_size < 0 ||
-        cfg->page_parity_size < 0) {
+        cfg->page_parity_size < 0 || cfg->plane <= 0) {
         return -1;
     }
 
@@ -517,6 +558,21 @@ int perf_init(const perf_config_t *cfg) {
     memset(&g_state, 0, sizeof(g_state));
     g_state.cfg = *cfg;
     g_state.d.die_per_chan = cfg->die_num / cfg->chan_num;
+    {
+        uint64_t total_planes =
+            (uint64_t)cfg->die_num * (uint64_t)cfg->plane;
+        if (total_planes > (uint64_t)cfg->iwl_slot) {
+            int per_die = cfg->iwl_slot / cfg->die_num;
+            if (cfg->iwl_slot % cfg->die_num != 0 ||
+                !is_power_of_two(per_die) || per_die <= 0) {
+                return -1;
+            }
+            g_state.d.max_planes_per_die =
+                (per_die > cfg->plane) ? cfg->plane : per_die;
+        } else {
+            g_state.d.max_planes_per_die = cfg->plane;
+        }
+    }
     if (cfg->sca) {
         g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead_sca * TIME_SCALE);
     } else {
@@ -545,13 +601,11 @@ int perf_init(const perf_config_t *cfg) {
     g_state.cmd_prio = (int *)calloc(cfg->qd, sizeof(int));
     g_state.die_ctx = (die_ctx_t *)calloc(
         cfg->chan_num * g_state.d.die_per_chan, sizeof(die_ctx_t));
-    g_state.die_state =
-        (int *)calloc(cfg->chan_num * g_state.d.die_per_chan, sizeof(int));
     g_state.rr_die = (int *)calloc(cfg->chan_num, sizeof(int));
     g_state.chan = (chan_t *)calloc(cfg->chan_num, sizeof(chan_t));
 
     if (!g_state.map || !g_state.cmd_op || !g_state.cmd_prio ||
-        !g_state.die_ctx || !g_state.die_state || !g_state.rr_die ||
+        !g_state.die_ctx || !g_state.rr_die ||
         !g_state.chan) {
         perf_cleanup();
         return -1;
@@ -563,9 +617,21 @@ int perf_init(const perf_config_t *cfg) {
         for (j = 0; j < g_state.d.die_per_chan; j++) {
             int prio;
             int op;
+            int slot_idx;
             die_ctx_t *ctx = die_ctx_at(i, j);
-            ctx->act = 0xFFF;
-            ctx->time = 0;
+            ctx->slot_count = g_state.d.max_planes_per_die;
+            ctx->slots = (plane_slot_t *)calloc(ctx->slot_count,
+                                                sizeof(plane_slot_t));
+            if (!ctx->slots) {
+                perf_cleanup();
+                return -1;
+            }
+            for (slot_idx = 0; slot_idx < ctx->slot_count; slot_idx++) {
+                ctx->slots[slot_idx].state = DIE_IDLE;
+                ctx->slots[slot_idx].act = 0xFFF;
+                ctx->slots[slot_idx].time = 0;
+            }
+            ctx->suspended_slot = -1;
             ctx->suspended_act = 0xFFF;
             ctx->suspended_op = OP_MAX;
             ctx->suspended_time = 0;
@@ -580,7 +646,6 @@ int perf_init(const perf_config_t *cfg) {
                     }
                 }
             }
-            *die_state_at(i, j) = DIE_IDLE;
         }
     }
 
@@ -589,6 +654,7 @@ int perf_init(const perf_config_t *cfg) {
         g_state.chan[i].act = 0xFFF;
         g_state.chan[i].op = OP_READ;
         g_state.chan[i].die = -1;
+        g_state.chan[i].slot = -1;
         g_state.rr_die[i] = 0;
     }
 
@@ -613,6 +679,8 @@ void perf_cleanup(void) {
                 int prio;
                 int op;
                 die_ctx_t *ctx = die_ctx_at(i, j);
+                free(ctx->slots);
+                ctx->slots = NULL;
                 for (prio = 0; prio < PRIO_MAX; prio++) {
                     for (op = 0; op < OP_MAX; op++) {
                         free(ctx->q[prio][op].list);
@@ -627,7 +695,6 @@ void perf_cleanup(void) {
     free(g_state.cmd_op);
     free(g_state.cmd_prio);
     free(g_state.die_ctx);
-    free(g_state.die_state);
     free(g_state.rr_die);
     free(g_state.chan);
 
@@ -728,30 +795,34 @@ void perf_run(perf_stats_t *stats) {
                     cur_time = get_time_us();
                     if (cur_time >= g_state.chan[i].time) {
                         if (g_state.chan[i].op == OP_READ) {
-                            *die_state_at(i, g_state.chan[i].die) =
-                                DIE_READ_WAIT;
-                            die_ctx_at(i, g_state.chan[i].die)->time =
-                                cur_time + g_state.d.tread;
+                            die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
+                            plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+                            ps->state = DIE_READ_WAIT;
+                            ps->time = cur_time + g_state.d.tread;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
                             g_state.chan[i].op = OP_READ;
                             g_state.chan[i].die = -1;
+                            g_state.chan[i].slot = -1;
                         } else if (g_state.chan[i].op == OP_WRITE) {
-                            *die_state_at(i, g_state.chan[i].die) =
-                                DIE_WRITE_DATA_READY;
+                            die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
+                            plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+                            ps->state = DIE_WRITE_DATA_READY;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
                             g_state.chan[i].op = OP_READ;
                             g_state.chan[i].die = -1;
+                            g_state.chan[i].slot = -1;
                         } else {
-                            *die_state_at(i, g_state.chan[i].die) =
-                                DIE_ERASE_WAIT;
-                            die_ctx_at(i, g_state.chan[i].die)->time =
-                                cur_time + g_state.d.terase;
+                            die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
+                            plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+                            ps->state = DIE_ERASE_WAIT;
+                            ps->time = cur_time + g_state.d.terase;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
                             g_state.chan[i].op = OP_READ;
                             g_state.chan[i].die = -1;
+                            g_state.chan[i].slot = -1;
                         }
                     }
                     break;
@@ -760,35 +831,42 @@ void perf_run(perf_stats_t *stats) {
                     if (cur_time >= g_state.chan[i].time) {
                         if (g_state.chan[i].op == OP_READ) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
+                            plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
                             g_state.map[g_state.chan[i].act] = 0;
                             inflight_cmds--;
                             total_cmd++;
                             read_cmd++;
                             if (ctx->suspended_op != OP_MAX) {
-                                ctx->act = ctx->suspended_act;
-                                ctx->time = cur_time + ctx->suspended_time;
-                                *die_state_at(i, g_state.chan[i].die) =
-                                    (ctx->suspended_op == OP_WRITE)
-                                        ? DIE_WRITE_WAIT
-                                        : DIE_ERASE_WAIT;
+                                plane_slot_t *sps =
+                                    slot_at(ctx, ctx->suspended_slot);
+                                sps->act = ctx->suspended_act;
+                                sps->time = cur_time + ctx->suspended_time;
+                                sps->state = (ctx->suspended_op == OP_WRITE)
+                                                 ? DIE_WRITE_WAIT
+                                                 : DIE_ERASE_WAIT;
+                                if (ctx->suspended_slot != g_state.chan[i].slot) {
+                                    ps->act = 0xFFF;
+                                    ps->state = DIE_IDLE;
+                                }
                                 ctx->suspended_act = 0xFFF;
                                 ctx->suspended_op = OP_MAX;
                                 ctx->suspended_time = 0;
+                                ctx->suspended_slot = -1;
                             } else {
-                                ctx->act = 0xFFF;
-                                *die_state_at(i, g_state.chan[i].die) =
-                                    DIE_IDLE;
+                                ps->act = 0xFFF;
+                                ps->state = DIE_IDLE;
                             }
                         } else if (g_state.chan[i].op == OP_WRITE) {
-                            *die_state_at(i, g_state.chan[i].die) =
-                                DIE_WRITE_WAIT;
-                            die_ctx_at(i, g_state.chan[i].die)->time =
-                                cur_time + g_state.d.tprog;
+                            die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
+                            plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+                            ps->state = DIE_WRITE_WAIT;
+                            ps->time = cur_time + g_state.d.tprog;
                         }
                         g_state.chan[i].act = 0xFFF;
                         g_state.chan[i].state = CHAN_IDLE;
                         g_state.chan[i].op = OP_READ;
                         g_state.chan[i].die = -1;
+                        g_state.chan[i].slot = -1;
                     }
                     break;
                 default:
