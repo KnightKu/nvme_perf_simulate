@@ -329,7 +329,8 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->page_parity_size = 1952;
     cfg->tr_fast = 40;
     cfg->tR = 40;
-    cfg->tPROG = 800;
+    cfg->tprog_eff = 800;
+    cfg->nand_type = 1;
     cfg->tERASE = 3000;
     cfg->qd = 512;
     cfg->chan_num = 16;
@@ -371,8 +372,12 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->tr_fast = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "tr") == 0) {
         cfg->tR = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "tprog_eff") == 0) {
+        cfg->tprog_eff = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "tprog") == 0) {
-        cfg->tPROG = (int)strtol(value, &end, 10);
+        cfg->tprog_eff = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "nand_type") == 0) {
+        cfg->nand_type = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "terase") == 0) {
         cfg->tERASE = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "qd") == 0) {
@@ -497,6 +502,12 @@ int perf_init(const perf_config_t *cfg) {
     if (cfg->read_ratio + cfg->write_ratio + cfg->erase_ratio <= 0) {
         return -1;
     }
+    if (cfg->nand_type != 1 && cfg->nand_type != 3 && cfg->nand_type != 4) {
+        return -1;
+    }
+    if (cfg->tprog_eff <= 0) {
+        return -1;
+    }
     if (cfg->prio_high_ratio + cfg->prio_normal_ratio +
             cfg->prio_low_ratio <=
         0) {
@@ -516,7 +527,9 @@ int perf_init(const perf_config_t *cfg) {
     } else {
         g_state.d.tread = (uint64_t)cfg->tR * TIME_SCALE;
     }
-    g_state.d.tprog = (uint64_t)cfg->tPROG * TIME_SCALE;
+    g_state.d.tprog =
+        (uint64_t)((uint64_t)cfg->tprog_eff * (uint64_t)cfg->nand_type) *
+        TIME_SCALE;
     g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
     g_state.d.data_time_read =
         (uint64_t)(((uint64_t)cfg->cmd_size + (uint64_t)cfg->ecc_parity_size) *

@@ -37,7 +37,8 @@ Erase IOPS = <erase_iops>
 - `page_parity_size`：写操作页 parity 大小（字节）
 - `tr_fast`：当 cmd_size 为 4KiB 时的读 tR（微秒）
 - `tr`：读 tR（微秒）
-- `tprog`：写 tPROG（微秒）
+- `tprog_eff`：写 tPROG 基准值（微秒）
+- `nand_type`：NAND 类型（SLC=1，TLC=3，QLC=4）
 - `terase`：擦 tERASE（微秒）
 
 **资源/规模参数**
@@ -70,7 +71,8 @@ page_size=16384
 page_parity_size=1952
 tr_fast=40
 tr=40
-tprog=800
+tprog_eff=800
+nand_type=1
 terase=3000
 qd=512
 chan_num=16

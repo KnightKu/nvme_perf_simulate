@@ -17,7 +17,8 @@ typedef struct perf_config {
     int page_parity_size;  // page parity size in bytes (write)
     int tr_fast;           // tR for 4KiB cmd_size
     int tR;
-    int tPROG;
+    int tprog_eff;         // base tPROG (before NAND type scaling)
+    int nand_type;         // SLC=1, TLC=3, QLC=4
     int tERASE;
     int qd;
     int chan_num;
