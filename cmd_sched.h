@@ -7,13 +7,13 @@
 #define TIME_SCALE (1000ULL)
 
 typedef struct perf_config {
-    double cmd_overhead;
-    double cmd_overhead_sca;
-    int sca;
+    double cmd_overhead;       // base cmd overhead (us)
+    double cmd_overhead_sca;   // cmd overhead when SCA enabled (us)
+    int sca;                   // 0=off, 1=on
     int chan_speed;
-    int cmd_size;
-    int ecc_parity_size;
-    int tr_fast;
+    int cmd_size;          // data payload size in bytes
+    int ecc_parity_size;   // ECC parity size in bytes
+    int tr_fast;           // tR for 4KiB cmd_size
     int tR;
     int tPROG;
     int tERASE;

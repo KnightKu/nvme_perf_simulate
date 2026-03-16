@@ -27,6 +27,7 @@ enum CMD_PRIO {
     PRIO_MAX,
 };
 
+// Suspend limits for read preemption.
 #define MAX_SUSPEND_WRITE 8
 #define MAX_SUSPEND_ERASE 15
 
@@ -60,6 +61,7 @@ typedef struct die_ctx_s {
     int act;
     uint64_t time;
     queue_t q[PRIO_MAX][OP_MAX];
+    // Suspended write/erase state for read preemption.
     int suspended_act;
     int suspended_op;
     uint64_t suspended_time;
@@ -203,6 +205,7 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
     int prio;
     int j;
 
+    // Pick highest priority cmd first; allow read to preempt write/erase waits.
     for (prio = PRIO_HIGH; prio < PRIO_MAX; prio++) {
         for (j = 0; j < g_state.d.die_per_chan; j++) {
             int die = (g_state.rr_die[chan_id] + j) % g_state.d.die_per_chan;
@@ -510,6 +513,7 @@ int perf_init(const perf_config_t *cfg) {
     g_state.d.data_time =
         (uint64_t)(((uint64_t)cfg->cmd_size + (uint64_t)cfg->ecc_parity_size) *
                    TIME_SCALE / cfg->chan_speed);
+    // data_time models payload + ECC parity transfer on channel.
 
     g_state.map = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_op = (int *)calloc(cfg->qd, sizeof(int));
@@ -804,6 +808,7 @@ perf_iops_t perf_calc_iops(const perf_stats_t *stats) {
     scale = 1000000.0 / elapsed;
     xor_ratio = (g_state.cfg.die_num > 64) ? 64 : g_state.cfg.die_num;
     xor_factor = ((double)xor_ratio - 1) / (double)xor_ratio;
+    // Apply die-level XOR scaling factor.
 
     total_effective =
         (stats->total_cmd > (uint64_t)g_state.cfg.qd)
