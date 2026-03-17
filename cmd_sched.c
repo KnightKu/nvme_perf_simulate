@@ -58,6 +58,7 @@ typedef struct queue_s {
 } queue_t;
 
 typedef struct plane_slot_s {
+    // Per-plane slot within a die to enforce max parallelism.
     int state;
     int act;
     uint64_t time;
@@ -222,6 +223,7 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
     int prio;
     int j;
 
+    // Scan dies by round-robin; within each die pick highest cmd priority.
     // Pick highest priority cmd first; allow read to preempt write/erase waits.
     for (prio = PRIO_HIGH; prio < PRIO_MAX; prio++) {
         for (j = 0; j < g_state.d.die_per_chan; j++) {
@@ -245,6 +247,7 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
                 }
             }
             if (slot < 0 && op == OP_READ && ctx->suspended_op == OP_MAX) {
+                // Read can suspend a write/erase wait slot to make room.
                 for (s = 0; s < ctx->slot_count; s++) {
                     plane_slot_t *ps = slot_at(ctx, s);
                     if ((ps->state == DIE_WRITE_WAIT ||
@@ -308,6 +311,7 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
             if (ps->state == DIE_READ_WAIT && cur_time >= ps->time) {
+                // Read data transfer uses channel bandwidth.
                 g_state.chan[chan_id].state = CHAN_DATA;
                 g_state.chan[chan_id].time =
                     cur_time + g_state.d.data_time_read;
@@ -335,6 +339,7 @@ static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
             if (ps->state == DIE_WRITE_DATA_READY) {
+                // Program data transfer uses channel bandwidth.
                 g_state.chan[chan_id].state = CHAN_DATA;
                 g_state.chan[chan_id].time =
                     cur_time + g_state.d.data_time_write;
@@ -772,6 +777,8 @@ void perf_run(perf_stats_t *stats) {
                     complete_wait_ops(i, cur_time, &inflight_cmds, &total_cmd,
                                       &write_cmd, &erase_cmd);
 
+                    // Channel idle arbitration: cmds first, read data can preempt
+                    // write/erase cmds, then write data last.
                     // Priority: read cmd, read data, write/erase cmds, then write data.
                     if (try_schedule_cmd(i, cur_time, OP_READ)) {
                         break;
