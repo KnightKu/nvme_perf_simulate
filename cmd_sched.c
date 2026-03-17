@@ -188,12 +188,13 @@ static inline void enqueue_cmd(int chan_id, int die_in_chan, int op, int prio,
     queue_push(&ctx->q[prio][op], act);
 }
 
-static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
-                                     int *inflight_cmds,
-                                     uint64_t *total_cmd,
-                                     uint64_t *write_cmd,
-                                     uint64_t *erase_cmd) {
+static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
+                                    int *inflight_cmds,
+                                    uint64_t *total_cmd,
+                                    uint64_t *write_cmd,
+                                    uint64_t *erase_cmd) {
     int j;
+    int completed = 0;
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
         int slot;
@@ -209,6 +210,7 @@ static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
                 g_state.map[act] = 0;
                 (*inflight_cmds)--;
                 (*total_cmd)++;
+                completed++;
                 if (g_state.cmd_op[act] == OP_WRITE) {
                     (*write_cmd)++;
                 } else if (g_state.cmd_op[act] == OP_ERASE) {
@@ -217,6 +219,7 @@ static inline void complete_wait_ops(int chan_id, uint64_t cur_time,
             }
         }
     }
+    return completed;
 }
 
 static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
@@ -741,6 +744,7 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
 void perf_run(perf_stats_t *stats) {
     int i;
     uint64_t cur_time;
+    uint64_t sim_time = 0;
     uint64_t total_cmd = 0;
     uint64_t read_cmd = 0;
     uint64_t write_cmd = 0;
@@ -765,41 +769,53 @@ void perf_run(perf_stats_t *stats) {
         }
 
         if (total_cmd > (uint64_t)tmp_cmd_cnt && start_time == 0) {
-            start_time = get_time_us();
+            start_time = sim_time;
         }
 
         perf_gen_cmd(tmp_cmd_cnt, &inflight_cmds);
 
+        {
+            int progressed = 0;
+            uint64_t next_event = UINT64_MAX;
+
         for (i = 0; i < g_state.cfg.chan_num; i++) {
             switch (g_state.chan[i].state) {
                 case CHAN_IDLE:
-                    cur_time = get_time_us();
-                    complete_wait_ops(i, cur_time, &inflight_cmds, &total_cmd,
-                                      &write_cmd, &erase_cmd);
+                    cur_time = sim_time;
+                    if (complete_wait_ops(i, cur_time, &inflight_cmds, &total_cmd,
+                                          &write_cmd, &erase_cmd) > 0) {
+                        progressed = 1;
+                    }
 
                     // Channel idle arbitration: cmds first, read data can preempt
                     // write/erase cmds, then write data last.
                     // Priority: read cmd, read data, write/erase cmds, then write data.
                     if (try_schedule_cmd(i, cur_time, OP_READ)) {
+                        progressed = 1;
                         break;
                     }
 
                     if (try_schedule_read_data(i, cur_time)) {
+                        progressed = 1;
                         break;
                     }
 
                     if (try_schedule_cmd(i, cur_time, OP_WRITE)) {
+                        progressed = 1;
                         break;
                     }
 
                     if (try_schedule_cmd(i, cur_time, OP_ERASE)) {
+                        progressed = 1;
                         break;
                     }
 
-                    (void)try_schedule_write_data(i, cur_time);
+                    if (try_schedule_write_data(i, cur_time)) {
+                        progressed = 1;
+                    }
                     break;
                 case CHAN_CMD:
-                    cur_time = get_time_us();
+                    cur_time = sim_time;
                     if (cur_time >= g_state.chan[i].time) {
                         if (g_state.chan[i].op == OP_READ) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
@@ -831,10 +847,11 @@ void perf_run(perf_stats_t *stats) {
                             g_state.chan[i].die = -1;
                             g_state.chan[i].slot = -1;
                         }
+                        progressed = 1;
                     }
                     break;
                 case CHAN_DATA:
-                    cur_time = get_time_us();
+                    cur_time = sim_time;
                     if (cur_time >= g_state.chan[i].time) {
                         if (g_state.chan[i].op == OP_READ) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
@@ -874,6 +891,7 @@ void perf_run(perf_stats_t *stats) {
                         g_state.chan[i].op = OP_READ;
                         g_state.chan[i].die = -1;
                         g_state.chan[i].slot = -1;
+                        progressed = 1;
                     }
                     break;
                 default:
@@ -881,9 +899,40 @@ void perf_run(perf_stats_t *stats) {
                     exit(1);
             }
         }
+            if (!progressed) {
+                int ch;
+                for (ch = 0; ch < g_state.cfg.chan_num; ch++) {
+                    if (g_state.chan[ch].state != CHAN_IDLE &&
+                        g_state.chan[ch].time > sim_time &&
+                        g_state.chan[ch].time < next_event) {
+                        next_event = g_state.chan[ch].time;
+                    }
+                }
+                for (ch = 0; ch < g_state.cfg.chan_num; ch++) {
+                    int d;
+                    for (d = 0; d < g_state.d.die_per_chan; d++) {
+                        int s;
+                        die_ctx_t *ctx = die_ctx_at(ch, d);
+                        for (s = 0; s < ctx->slot_count; s++) {
+                            plane_slot_t *ps = slot_at(ctx, s);
+                            if ((ps->state == DIE_READ_WAIT ||
+                                 ps->state == DIE_WRITE_WAIT ||
+                                 ps->state == DIE_ERASE_WAIT) &&
+                                ps->time > sim_time && ps->time < next_event) {
+                                next_event = ps->time;
+                            }
+                        }
+                    }
+                }
+                if (next_event == UINT64_MAX) {
+                    break;
+                }
+                sim_time = next_event;
+            }
+        }
     }
 
-    end_time = get_time_us();
+    end_time = sim_time;
     if (stats) {
         stats->total_cmd = total_cmd;
         stats->read_cmd = read_cmd;
