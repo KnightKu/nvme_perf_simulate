@@ -5,6 +5,7 @@
 #include <inttypes.h>
 #include <linux/fs.h>
 #include <linux/nvme_ioctl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +15,8 @@
 
 #define READ_SIZE_BYTES (1U << 20)                    /* 1 MiB */
 #define TARGET_OFFSET_BYTES (12ULL * (1ULL << 40))    /* 12 TiB */
-#define DEFAULT_DEVICE "/dev/nvme0n1"
+#define DEFAULT_DEVICE "/dev/nvme0"
+#define IDENTIFY_DATA_SIZE 4096U
 
 static const char *errno_category(int err)
 {
@@ -140,6 +142,67 @@ static void dump_first_128_bytes(const uint8_t *buf)
     }
 }
 
+static int get_lba_size_from_identify_ns(int fd, uint32_t nsid, int *lba_size_out)
+{
+    void *id_ns = NULL;
+    struct nvme_admin_cmd acmd;
+    uint8_t *id;
+    uint8_t nlbaf;
+    uint8_t flbas;
+    size_t lbaf_off;
+    uint8_t lbads;
+    uint64_t lba_sz;
+    int ret;
+
+    if (posix_memalign(&id_ns, 4096, IDENTIFY_DATA_SIZE) != 0 || id_ns == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    memset(id_ns, 0, IDENTIFY_DATA_SIZE);
+    memset(&acmd, 0, sizeof(acmd));
+
+    acmd.opcode = 0x06; /* Identify */
+    acmd.nsid = nsid;
+    acmd.addr = (uint64_t)(uintptr_t)id_ns;
+    acmd.data_len = IDENTIFY_DATA_SIZE;
+    acmd.cdw10 = 0x0;   /* CNS=0x0: Identify Namespace */
+    acmd.timeout_ms = 30000;
+
+    ret = ioctl(fd, NVME_IOCTL_ADMIN_CMD, &acmd);
+    if (ret != 0) {
+        free(id_ns);
+        return ret;
+    }
+
+    id = (uint8_t *)id_ns;
+    nlbaf = id[25];
+    flbas = id[26] & 0x0fU;
+    if (flbas > nlbaf || flbas >= 16) {
+        free(id_ns);
+        errno = EINVAL;
+        return -1;
+    }
+
+    lbaf_off = 128U + (size_t)flbas * 4U;
+    lbads = id[lbaf_off + 2];
+    if (lbads >= 63) {
+        free(id_ns);
+        errno = ERANGE;
+        return -1;
+    }
+
+    lba_sz = 1ULL << lbads;
+    if (lba_sz == 0 || lba_sz > (uint64_t)INT_MAX) {
+        free(id_ns);
+        errno = ERANGE;
+        return -1;
+    }
+
+    *lba_size_out = (int)lba_sz;
+    free(id_ns);
+    return 0;
+}
+
 static int submit_io_read(int fd, uint32_t nsid, uint64_t slba, uint32_t lba_size, void *buf)
 {
     uint32_t nblocks = READ_SIZE_BYTES / lba_size;
@@ -200,23 +263,35 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (ioctl(fd, BLKSSZGET, &lba_size) < 0) {
-        report_errno("ioctl(BLKSSZGET)");
-        fprintf(stderr, "无法获取逻辑块大小，程序终止。\n");
-        close(fd);
-        return 1;
-    }
-    if (lba_size <= 0 || (READ_SIZE_BYTES % (uint32_t)lba_size) != 0) {
-        fprintf(stderr, "逻辑块大小非法或与 1MiB 不对齐: lba_size=%d\n", lba_size);
-        close(fd);
-        return 1;
-    }
-
     nsid = ioctl(fd, NVME_IOCTL_ID);
     if (nsid < 0) {
         report_errno("ioctl(NVME_IOCTL_ID)");
         fprintf(stderr, "将回退使用 nsid=1 继续尝试。\n");
         nsid = 1;
+    }
+
+    if (ioctl(fd, BLKSSZGET, &lba_size) < 0) {
+        report_errno("ioctl(BLKSSZGET)");
+        fprintf(stderr, "尝试通过 Identify Namespace 获取逻辑块大小...\n");
+        ret = get_lba_size_from_identify_ns(fd, (uint32_t)nsid, &lba_size);
+        if (ret < 0) {
+            report_errno("ioctl(NVME_IOCTL_ADMIN_CMD: Identify Namespace)");
+            fprintf(stderr, "无法获取逻辑块大小，程序终止。\n");
+            close(fd);
+            return 1;
+        }
+        if (ret > 0) {
+            fprintf(stderr, "Identify Namespace 返回 NVMe 错误状态。\n");
+            report_nvme_status(ret);
+            close(fd);
+            return 1;
+        }
+    }
+
+    if (lba_size <= 0 || (READ_SIZE_BYTES % (uint32_t)lba_size) != 0) {
+        fprintf(stderr, "逻辑块大小非法或与 1MiB 不对齐: lba_size=%d\n", lba_size);
+        close(fd);
+        return 1;
     }
 
     if ((TARGET_OFFSET_BYTES % (uint64_t)lba_size) != 0) {
