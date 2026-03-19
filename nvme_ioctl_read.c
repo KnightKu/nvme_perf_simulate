@@ -188,8 +188,11 @@ int main(int argc, char **argv)
     uint64_t slba;
     int ret;
 
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     printf("目标设备: %s\n", dev);
     printf("目标偏移: 12 TiB, 读取长度: 1 MiB\n");
+    fflush(stdout);
 
     fd = open(dev, O_RDONLY);
     if (fd < 0) {
