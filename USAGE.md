@@ -51,6 +51,11 @@ Erase IOPS = <erase_iops>
 **命令类型比例**
 - `read_ratio` / `write_ratio` / `erase_ratio`
 
+**IO 模式**
+- `io_pattern`：命令目标 die 选取方式
+  - `random`（默认）：均匀随机 die
+  - `sequential`（或 `seq`）：按 global die index 0 → die_num-1 循环
+
 **优先级比例**
 - `prio_high_ratio` / `prio_normal_ratio` / `prio_low_ratio`
 
@@ -85,6 +90,7 @@ erase_ratio=0
 prio_high_ratio=0
 prio_normal_ratio=100
 prio_low_ratio=0
+io_pattern=random
 element=32768
 ```
 

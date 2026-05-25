@@ -6,6 +6,9 @@
 // No need to change in genereal
 #define TIME_SCALE (1000ULL)
 
+#define PERF_IO_PATTERN_RANDOM 0
+#define PERF_IO_PATTERN_SEQUENTIAL 1
+
 typedef struct perf_config {
     double cmd_overhead;       // base cmd overhead (us)
     double cmd_overhead_sca;   // cmd overhead when SCA enabled (us)
@@ -31,6 +34,7 @@ typedef struct perf_config {
     int prio_high_ratio;
     int prio_normal_ratio;
     int prio_low_ratio;
+    int io_pattern;  // PERF_IO_PATTERN_RANDOM or PERF_IO_PATTERN_SEQUENTIAL
     uint64_t element;
 } perf_config_t;
 

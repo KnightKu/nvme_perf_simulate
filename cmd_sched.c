@@ -27,6 +27,11 @@ enum CMD_PRIO {
     PRIO_MAX,
 };
 
+enum IO_PATTERN {
+    IO_PATTERN_RANDOM = PERF_IO_PATTERN_RANDOM,
+    IO_PATTERN_SEQUENTIAL = PERF_IO_PATTERN_SEQUENTIAL,
+};
+
 // Suspend limits for read preemption.
 #define MAX_SUSPEND_WRITE 8
 #define MAX_SUSPEND_ERASE 15
@@ -106,6 +111,7 @@ typedef struct perf_state {
     die_ctx_t *die_ctx;
     int *rr_die;
     chan_t *chan;
+    int next_die;
     int initialized;
 } perf_state_t;
 
@@ -180,6 +186,18 @@ static inline int select_prio() {
         return PRIO_NORMAL;
     }
     return PRIO_LOW;
+}
+
+static inline int select_die() {
+    int die;
+
+    if (g_state.cfg.io_pattern == IO_PATTERN_SEQUENTIAL) {
+        die = g_state.next_die;
+        g_state.next_die = (g_state.next_die + 1) % g_state.cfg.die_num;
+        return die;
+    }
+
+    return rand() % g_state.cfg.die_num;
 }
 
 static inline void enqueue_cmd(int chan_id, int die_in_chan, int op, int prio,
@@ -392,6 +410,7 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->prio_high_ratio = 0;
     cfg->prio_normal_ratio = 100;
     cfg->prio_low_ratio = 0;
+    cfg->io_pattern = PERF_IO_PATTERN_RANDOM;
     cfg->element = (uint64_t)(1 * 32 * 1024);
 }
 
@@ -451,6 +470,17 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->prio_normal_ratio = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "prio_low_ratio") == 0) {
         cfg->prio_low_ratio = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "io_pattern") == 0) {
+        if (strcmp(value, "random") == 0) {
+            cfg->io_pattern = PERF_IO_PATTERN_RANDOM;
+            end = (char *)(value + strlen(value));
+        } else if (strcmp(value, "sequential") == 0 ||
+                   strcmp(value, "seq") == 0) {
+            cfg->io_pattern = PERF_IO_PATTERN_SEQUENTIAL;
+            end = (char *)(value + strlen(value));
+        } else {
+            return -1;
+        }
     } else if (strcmp(key, "element") == 0) {
         cfg->element = (uint64_t)strtoull(value, &end, 10);
     } else {
@@ -560,6 +590,10 @@ int perf_init(const perf_config_t *cfg) {
     if (cfg->prio_high_ratio + cfg->prio_normal_ratio +
             cfg->prio_low_ratio <=
         0) {
+        return -1;
+    }
+    if (cfg->io_pattern != PERF_IO_PATTERN_RANDOM &&
+        cfg->io_pattern != PERF_IO_PATTERN_SEQUENTIAL) {
         return -1;
     }
 
@@ -672,6 +706,7 @@ int perf_init(const perf_config_t *cfg) {
         g_state.cmd_prio[i] = PRIO_NORMAL;
     }
 
+    g_state.next_die = 0;
     g_state.initialized = 1;
     return 0;
 }
@@ -712,7 +747,7 @@ void perf_cleanup(void) {
 int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
     int i;
     int act;
-    int tmp;
+    int die;
 
     if (!g_state.initialized || !inflight_cmds) {
         return 0;
@@ -729,9 +764,9 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
             act = i;
             g_state.cmd_op[act] = op;
             g_state.cmd_prio[act] = prio;
-            tmp = rand() % g_state.cfg.die_num;
-            enqueue_cmd(tmp % g_state.cfg.chan_num,
-                        tmp / g_state.cfg.chan_num, op, prio, act);
+            die = select_die();
+            enqueue_cmd(die % g_state.cfg.chan_num,
+                        die / g_state.cfg.chan_num, op, prio, act);
             g_state.map[i] = 1;
             (*inflight_cmds)++;
             return 1;

@@ -25,6 +25,12 @@
 - 调度时：高优先级先执行，再 normal，再 low。
 - 生成时：由配置文件的 `prio_*_ratio` 决定。
 
+### 3.4 IO pattern（命令生成）
+由 `io_pattern` 控制新命令的目标 die：
+- **random**：`die = rand() % die_num`，均匀随机。
+- **sequential**：global die index 从 0 递增到 `die_num - 1` 后回绕；
+  映射为 `chan = die % chan_num`，`die_in_chan = die / chan_num`。
+
 ## 4. Suspend 机制（读优先）
 当同一 die 上存在读与写/擦冲突时，读命令拥有最高优先级，可 **suspend**：
 - **写/Program**：最多可被打断 **8 次**

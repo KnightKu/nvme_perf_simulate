@@ -20,6 +20,7 @@ perf.conf      配置文件
 - `perf_config_t`：配置参数载体
 - `perf_load_config()`：解析配置文件
 - `perf_init()`：初始化全局状态和队列
+- `io_pattern`：命令生成时的 die 选取（random / sequential）
 
 #### 调度核心
 - **Channel 状态机**：IDLE / CMD / DATA
