@@ -32,6 +32,17 @@ enum IO_PATTERN {
     IO_PATTERN_SEQUENTIAL = PERF_IO_PATTERN_SEQUENTIAL,
 };
 
+enum STRIPE_MODE {
+    STRIPE_CHANNEL_MAJOR = PERF_STRIPE_CHANNEL_MAJOR,
+    STRIPE_GLOBAL_DIE = PERF_STRIPE_GLOBAL_DIE,
+};
+
+enum WORKLOAD {
+    WORKLOAD_LEGACY = PERF_WORKLOAD_LEGACY,
+    WORKLOAD_FULLDEV_SEQ_READ = PERF_WORKLOAD_FULLDEV_SEQ_READ,
+    WORKLOAD_FULLDEV_SEQ_WRITE = PERF_WORKLOAD_FULLDEV_SEQ_WRITE,
+};
+
 // Suspend limits for read preemption.
 #define MAX_SUSPEND_WRITE 8
 #define MAX_SUSPEND_ERASE 15
@@ -98,6 +109,12 @@ typedef struct perf_derived {
     uint64_t terase;
     uint64_t data_time_read;
     uint64_t data_time_write;
+    int read_xfer_size;
+    int write_xfer_size;
+    int read_bytes_per_cmd;
+    int write_bytes_per_cmd;
+    double read_ceiling_mbps;
+    double write_ceiling_mbps;
     int die_per_chan;
     int max_planes_per_die;
 } perf_derived_t;
@@ -110,6 +127,8 @@ typedef struct perf_state {
     int *cmd_prio;
     die_ctx_t *die_ctx;
     int *rr_die;
+    int *stripe_cursor;
+    int rr_chan;
     chan_t *chan;
     int next_die;
     int initialized;
@@ -161,9 +180,19 @@ static inline int is_power_of_two(int value) {
 }
 
 static inline int select_op() {
-    int total = g_state.cfg.read_ratio + g_state.cfg.write_ratio +
-                g_state.cfg.erase_ratio;
-    int r = rand() % total;
+    int total;
+    int r;
+
+    if (g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_READ) {
+        return OP_READ;
+    }
+    if (g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_WRITE) {
+        return OP_WRITE;
+    }
+
+    total = g_state.cfg.read_ratio + g_state.cfg.write_ratio +
+            g_state.cfg.erase_ratio;
+    r = rand() % total;
     if (r < g_state.cfg.read_ratio) {
         return OP_READ;
     }
@@ -188,16 +217,53 @@ static inline int select_prio() {
     return PRIO_LOW;
 }
 
-static inline int select_die() {
-    int die;
+static inline int effective_stripe_mode(void) {
+    if (g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_READ ||
+        g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_WRITE) {
+        return STRIPE_CHANNEL_MAJOR;
+    }
+    return g_state.cfg.stripe_mode;
+}
 
-    if (g_state.cfg.io_pattern == IO_PATTERN_SEQUENTIAL) {
-        die = g_state.next_die;
-        g_state.next_die = (g_state.next_die + 1) % g_state.cfg.die_num;
-        return die;
+static inline void select_target(int *chan_id, int *die_in_chan) {
+    int stripe = effective_stripe_mode();
+
+    if (stripe == STRIPE_CHANNEL_MAJOR) {
+        int ch = g_state.rr_chan % g_state.cfg.chan_num;
+        int die = g_state.stripe_cursor[ch] % g_state.d.die_per_chan;
+
+        g_state.rr_chan = (g_state.rr_chan + 1) % g_state.cfg.chan_num;
+        g_state.stripe_cursor[ch] =
+            (g_state.stripe_cursor[ch] + 1) % g_state.d.die_per_chan;
+        *chan_id = ch;
+        *die_in_chan = die;
+        return;
     }
 
-    return rand() % g_state.cfg.die_num;
+    if (g_state.cfg.io_pattern == IO_PATTERN_SEQUENTIAL) {
+        int global_die = g_state.next_die;
+
+        g_state.next_die = (g_state.next_die + 1) % g_state.cfg.die_num;
+        *chan_id = global_die % g_state.cfg.chan_num;
+        *die_in_chan = global_die / g_state.cfg.chan_num;
+        return;
+    }
+
+    {
+        int global_die = rand() % g_state.cfg.die_num;
+
+        *chan_id = global_die % g_state.cfg.chan_num;
+        *die_in_chan = global_die / g_state.cfg.chan_num;
+    }
+}
+
+static inline double channel_payload_mbps(uint64_t payload_bytes,
+                                          uint64_t data_time) {
+    if (data_time == 0) {
+        return 0.0;
+    }
+    return (double)payload_bytes * (double)TIME_SCALE / (double)data_time *
+           1000000.0 / 1048576.0;
 }
 
 static inline void enqueue_cmd(int chan_id, int die_in_chan, int op, int prio,
@@ -411,6 +477,9 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->prio_normal_ratio = 100;
     cfg->prio_low_ratio = 0;
     cfg->io_pattern = PERF_IO_PATTERN_RANDOM;
+    cfg->stripe_mode = PERF_STRIPE_CHANNEL_MAJOR;
+    cfg->workload = PERF_WORKLOAD_LEGACY;
+    cfg->block_size = 0;
     cfg->element = (uint64_t)(1 * 32 * 1024);
 }
 
@@ -428,6 +497,8 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->chan_speed = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "cmd_size") == 0) {
         cfg->cmd_size = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "block_size") == 0) {
+        cfg->block_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "ecc_parity_size") == 0) {
         cfg->ecc_parity_size = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "page_size") == 0) {
@@ -481,6 +552,34 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         } else {
             return -1;
         }
+    } else if (strcmp(key, "stripe_mode") == 0) {
+        if (strcmp(value, "channel_major") == 0 ||
+            strcmp(value, "channel") == 0) {
+            cfg->stripe_mode = PERF_STRIPE_CHANNEL_MAJOR;
+            end = (char *)(value + strlen(value));
+        } else if (strcmp(value, "global_die") == 0 ||
+                   strcmp(value, "die") == 0) {
+            cfg->stripe_mode = PERF_STRIPE_GLOBAL_DIE;
+            end = (char *)(value + strlen(value));
+        } else {
+            return -1;
+        }
+    } else if (strcmp(key, "workload") == 0) {
+        if (strcmp(value, "legacy") == 0 || strcmp(value, "mixed") == 0 ||
+            strcmp(value, "default") == 0) {
+            cfg->workload = PERF_WORKLOAD_LEGACY;
+            end = (char *)(value + strlen(value));
+        } else if (strcmp(value, "fulldev_seq_read") == 0 ||
+                   strcmp(value, "seq_read_bw") == 0) {
+            cfg->workload = PERF_WORKLOAD_FULLDEV_SEQ_READ;
+            end = (char *)(value + strlen(value));
+        } else if (strcmp(value, "fulldev_seq_write") == 0 ||
+                   strcmp(value, "seq_write_bw") == 0) {
+            cfg->workload = PERF_WORKLOAD_FULLDEV_SEQ_WRITE;
+            end = (char *)(value + strlen(value));
+        } else {
+            return -1;
+        }
     } else if (strcmp(key, "element") == 0) {
         cfg->element = (uint64_t)strtoull(value, &end, 10);
     } else {
@@ -516,6 +615,23 @@ static void to_lower_str(char *str) {
     }
 }
 
+static void strip_inline_comment(char *value) {
+    char *p;
+
+    if (!value) {
+        return;
+    }
+    p = strchr(value, '#');
+    if (p) {
+        *p = '\0';
+    }
+    p = strstr(value, "//");
+    if (p) {
+        *p = '\0';
+    }
+    trim_space(value);
+}
+
 int perf_load_config(const char *path, perf_config_t *cfg) {
     FILE *fp;
     char line[256];
@@ -547,6 +663,7 @@ int perf_load_config(const char *path, perf_config_t *cfg) {
         value = trim_space(eq + 1);
         key = trim_space(key);
         to_lower_str(key);
+        strip_inline_comment(value);
 
         rc = set_config_value(cfg, key, value);
         if (rc < 0) {
@@ -596,6 +713,18 @@ int perf_init(const perf_config_t *cfg) {
         cfg->io_pattern != PERF_IO_PATTERN_SEQUENTIAL) {
         return -1;
     }
+    if (cfg->stripe_mode != PERF_STRIPE_CHANNEL_MAJOR &&
+        cfg->stripe_mode != PERF_STRIPE_GLOBAL_DIE) {
+        return -1;
+    }
+    if (cfg->workload != PERF_WORKLOAD_LEGACY &&
+        cfg->workload != PERF_WORKLOAD_FULLDEV_SEQ_READ &&
+        cfg->workload != PERF_WORKLOAD_FULLDEV_SEQ_WRITE) {
+        return -1;
+    }
+    if (cfg->block_size < 0) {
+        return -1;
+    }
 
     memset(&g_state, 0, sizeof(g_state));
     g_state.cfg = *cfg;
@@ -615,27 +744,49 @@ int perf_init(const perf_config_t *cfg) {
             g_state.d.max_planes_per_die = cfg->plane;
         }
     }
-    if (cfg->sca) {
-        g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead_sca * TIME_SCALE);
-    } else {
-        g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead * TIME_SCALE);
+    {
+        int read_sz =
+            cfg->block_size > 0 ? cfg->block_size : cfg->cmd_size;
+        int write_sz =
+            cfg->block_size > 0 ? cfg->block_size : cfg->page_size;
+        uint64_t read_payload;
+        uint64_t write_payload;
+
+        g_state.d.read_xfer_size = read_sz;
+        g_state.d.write_xfer_size = write_sz;
+        g_state.d.read_bytes_per_cmd = read_sz;
+        g_state.d.write_bytes_per_cmd = write_sz;
+        read_payload =
+            (uint64_t)read_sz + (uint64_t)cfg->ecc_parity_size;
+        write_payload =
+            (uint64_t)write_sz + (uint64_t)cfg->page_parity_size;
+
+        if (cfg->sca) {
+            g_state.d.cmd_time =
+                (uint64_t)(cfg->cmd_overhead_sca * TIME_SCALE);
+        } else {
+            g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead * TIME_SCALE);
+        }
+        if (read_sz == 4096) {
+            g_state.d.tread = (uint64_t)cfg->tr_fast * TIME_SCALE;
+        } else {
+            g_state.d.tread = (uint64_t)cfg->tR * TIME_SCALE;
+        }
+        g_state.d.tprog =
+            (uint64_t)((uint64_t)cfg->tprog_eff * (uint64_t)cfg->nand_type) *
+            TIME_SCALE;
+        g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
+        g_state.d.data_time_read =
+            read_payload * TIME_SCALE / (uint64_t)cfg->chan_speed;
+        g_state.d.data_time_write =
+            write_payload * TIME_SCALE / (uint64_t)cfg->chan_speed;
+        g_state.d.read_ceiling_mbps =
+            (double)cfg->chan_num *
+            channel_payload_mbps(read_payload, g_state.d.data_time_read);
+        g_state.d.write_ceiling_mbps =
+            (double)cfg->chan_num *
+            channel_payload_mbps(write_payload, g_state.d.data_time_write);
     }
-    if (cfg->cmd_size == 4096) {
-        g_state.d.tread = (uint64_t)cfg->tr_fast * TIME_SCALE;
-    } else {
-        g_state.d.tread = (uint64_t)cfg->tR * TIME_SCALE;
-    }
-    g_state.d.tprog =
-        (uint64_t)((uint64_t)cfg->tprog_eff * (uint64_t)cfg->nand_type) *
-        TIME_SCALE;
-    g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
-    g_state.d.data_time_read =
-        (uint64_t)(((uint64_t)cfg->cmd_size + (uint64_t)cfg->ecc_parity_size) *
-                   TIME_SCALE / cfg->chan_speed);
-    g_state.d.data_time_write =
-        (uint64_t)(((uint64_t)cfg->page_size +
-                    (uint64_t)cfg->page_parity_size) *
-                   TIME_SCALE / cfg->chan_speed);
     // data_time_* models payload + parity transfer on channel.
 
     g_state.map = (int *)calloc(cfg->qd, sizeof(int));
@@ -644,10 +795,11 @@ int perf_init(const perf_config_t *cfg) {
     g_state.die_ctx = (die_ctx_t *)calloc(
         cfg->chan_num * g_state.d.die_per_chan, sizeof(die_ctx_t));
     g_state.rr_die = (int *)calloc(cfg->chan_num, sizeof(int));
+    g_state.stripe_cursor = (int *)calloc(cfg->chan_num, sizeof(int));
     g_state.chan = (chan_t *)calloc(cfg->chan_num, sizeof(chan_t));
 
     if (!g_state.map || !g_state.cmd_op || !g_state.cmd_prio ||
-        !g_state.die_ctx || !g_state.rr_die ||
+        !g_state.die_ctx || !g_state.rr_die || !g_state.stripe_cursor ||
         !g_state.chan) {
         perf_cleanup();
         return -1;
@@ -707,6 +859,7 @@ int perf_init(const perf_config_t *cfg) {
     }
 
     g_state.next_die = 0;
+    g_state.rr_chan = 0;
     g_state.initialized = 1;
     return 0;
 }
@@ -739,6 +892,7 @@ void perf_cleanup(void) {
     free(g_state.cmd_prio);
     free(g_state.die_ctx);
     free(g_state.rr_die);
+    free(g_state.stripe_cursor);
     free(g_state.chan);
 
     memset(&g_state, 0, sizeof(g_state));
@@ -747,7 +901,8 @@ void perf_cleanup(void) {
 int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
     int i;
     int act;
-    int die;
+    int chan_id;
+    int die_in_chan;
 
     if (!g_state.initialized || !inflight_cmds) {
         return 0;
@@ -764,9 +919,8 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
             act = i;
             g_state.cmd_op[act] = op;
             g_state.cmd_prio[act] = prio;
-            die = select_die();
-            enqueue_cmd(die % g_state.cfg.chan_num,
-                        die / g_state.cfg.chan_num, op, prio, act);
+            select_target(&chan_id, &die_in_chan);
+            enqueue_cmd(chan_id, die_in_chan, op, prio, act);
             g_state.map[i] = 1;
             (*inflight_cmds)++;
             return 1;
@@ -784,6 +938,8 @@ void perf_run(perf_stats_t *stats) {
     uint64_t read_cmd = 0;
     uint64_t write_cmd = 0;
     uint64_t erase_cmd = 0;
+    uint64_t read_bytes = 0;
+    uint64_t write_bytes = 0;
     int tmp_cmd_cnt = 0;
     int inflight_cmds = 0;
     uint64_t start_time = 0;
@@ -895,6 +1051,8 @@ void perf_run(perf_stats_t *stats) {
                             inflight_cmds--;
                             total_cmd++;
                             read_cmd++;
+                            read_bytes +=
+                                (uint64_t)g_state.d.read_bytes_per_cmd;
                             if (ctx->suspended_op != OP_MAX) {
                                 plane_slot_t *sps =
                                     slot_at(ctx, ctx->suspended_slot);
@@ -920,6 +1078,8 @@ void perf_run(perf_stats_t *stats) {
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
                             ps->state = DIE_WRITE_WAIT;
                             ps->time = cur_time + g_state.d.tprog;
+                            write_bytes +=
+                                (uint64_t)g_state.d.write_bytes_per_cmd;
                         }
                         g_state.chan[i].act = 0xFFF;
                         g_state.chan[i].state = CHAN_IDLE;
@@ -973,9 +1133,48 @@ void perf_run(perf_stats_t *stats) {
         stats->read_cmd = read_cmd;
         stats->write_cmd = write_cmd;
         stats->erase_cmd = erase_cmd;
+        stats->read_bytes = read_bytes;
+        stats->write_bytes = write_bytes;
         stats->start_time = start_time;
         stats->end_time = end_time;
     }
+}
+
+perf_bandwidth_t perf_calc_bandwidth(const perf_stats_t *stats) {
+    perf_bandwidth_t bw = {0.0, 0.0, 0.0, 0.0, 0.0};
+    double elapsed_us;
+    int xor_ratio;
+    double xor_factor;
+
+    if (!stats || !g_state.initialized) {
+        return bw;
+    }
+
+    bw.read_ceiling_mbps = g_state.d.read_ceiling_mbps;
+    bw.write_ceiling_mbps = g_state.d.write_ceiling_mbps;
+
+    if (stats->end_time <= stats->start_time) {
+        return bw;
+    }
+
+    elapsed_us =
+        (double)(stats->end_time - stats->start_time) / (double)TIME_SCALE;
+    if (elapsed_us <= 0.0) {
+        return bw;
+    }
+
+    xor_ratio = (g_state.cfg.die_num > 64) ? 64 : g_state.cfg.die_num;
+    xor_factor = ((double)xor_ratio - 1) / (double)xor_ratio;
+
+    bw.read_mbps =
+        (double)stats->read_bytes / elapsed_us * 1000000.0 / 1048576.0 *
+        xor_factor;
+    bw.write_mbps =
+        (double)stats->write_bytes / elapsed_us * 1000000.0 / 1048576.0 *
+        xor_factor;
+    bw.total_mbps = bw.read_mbps + bw.write_mbps;
+
+    return bw;
 }
 
 perf_iops_t perf_calc_iops(const perf_stats_t *stats) {

@@ -2,7 +2,7 @@
 
 ## 1. 模块结构
 ```
-main.c         入口程序，加载配置、运行仿真、输出 IOPS
+main.c         入口程序，加载配置、运行仿真、输出 IOPS 与带宽
 cmd_sched.h    对外接口与配置结构
 cmd_sched.c    核心调度逻辑与状态机实现
 perf.conf      配置文件
@@ -13,14 +13,14 @@ perf.conf      配置文件
 - 读取配置文件（`perf.conf` 或命令行指定路径）
 - 初始化调度器
 - 运行仿真
-- 输出总 IOPS 与读/写/擦 IOPS
+- 输出总 IOPS、读/写/擦 IOPS 与读/写带宽（MB/s）
 
 ### 2.2 cmd_sched
 #### 配置与初始化
 - `perf_config_t`：配置参数载体
 - `perf_load_config()`：解析配置文件
 - `perf_init()`：初始化全局状态和队列
-- `io_pattern`：命令生成时的 die 选取（random / sequential）
+- `workload` / `stripe_mode` / `io_pattern` / `block_size`：命令生成与传数粒度
 
 #### 调度核心
 - **Channel 状态机**：IDLE / CMD / DATA
@@ -30,8 +30,8 @@ perf.conf      配置文件
 - **Suspend 机制**：读可打断 write/erase（阈值控制）
 
 #### 统计
-- `perf_stats_t`：记录总数及读/写/擦计数
-- `perf_calc_iops()`：计算总/读/写/擦 IOPS
+- `perf_stats_t`：命令计数与 `read_bytes` / `write_bytes`
+- `perf_calc_iops()` / `perf_calc_bandwidth()`：稳态窗口内的 IOPS 与 MB/s
 
 ## 3. 数据流
 ```
@@ -41,7 +41,7 @@ perf.conf      配置文件
                    perf_run
                         |
                         v
-                 perf_calc_iops
+          perf_calc_iops + perf_calc_bandwidth
                         |
                         v
                       输出
