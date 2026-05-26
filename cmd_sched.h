@@ -21,8 +21,8 @@ typedef struct perf_config {
     double cmd_overhead_sca;   // cmd overhead when SCA enabled (us)
     int sca;                   // 0=off, 1=on
     int chan_speed;
-    int cmd_size;          // cmd payload for tR selection (bytes)
-    int block_size;        // host IO size for data xfer + bandwidth (0 -> cmd_size/page_size)
+    int cmd_size;          // NAND read cmd size for tR selection (tr_fast when 4096)
+    int block_size;        // host IO on channel + bandwidth bytes (0 -> cmd_size/page_size)
     int ecc_parity_size;   // ECC parity size in bytes
     int page_size;         // page data size in bytes (write)
     int page_parity_size;  // page parity size in bytes (write)
@@ -70,8 +70,25 @@ typedef struct perf_bandwidth {
     double read_mbps;
     double write_mbps;
     double total_mbps;
+    /* Channel wire-rate ceiling (host + parity on the bus). */
     double read_ceiling_mbps;
     double write_ceiling_mbps;
+    /* Host-byte ceiling at the same wire transfer time as above. */
+    double read_ceiling_host_mbps;
+    double write_ceiling_host_mbps;
+    /* Wire ceiling scaled by die XOR factor (matches reported sim BW). */
+    double read_ceiling_xor_mbps;
+    double write_ceiling_xor_mbps;
+    /* Simulated BW without XOR scaling. */
+    double read_mbps_raw;
+    double write_mbps_raw;
+    /* Utilization: sim vs wire / host / xor ceilings (%). */
+    double read_util_wire_pct;
+    double read_util_host_pct;
+    double read_util_xor_pct;
+    double write_util_wire_pct;
+    double write_util_host_pct;
+    double write_util_xor_pct;
 } perf_bandwidth_t;
 
 const char *perf_default_config_path(void);

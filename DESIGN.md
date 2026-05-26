@@ -36,14 +36,25 @@
 - `channel_major`：`rr_chan` 轮询 channel，每 channel 的 `stripe_cursor[ch]` 递增 die。
 - `global_die` + `io_pattern`：`random` 或 global die `sequential`。
 
-**块大小**
-- `block_size > 0`：用于 `data_time_*` 与带宽字节统计；
-- `block_size = 0`：读用 `cmd_size`，写用 `page_size`。
+**块大小与 tR（cmd_size 与 block_size 拆分）**
+- `cmd_size`：仅用于读 **tR** 选择（`cmd_size==4096` → `tr_fast`，否则 `tR`）。
+- `block_size`：用于 **channel 传数时间** `data_time_*` 与带宽字节统计；
+  `block_size=0` 时读回退 `cmd_size`，写回退 `page_size`。
+- 典型全盘顺序读：`cmd_size=4096`、`block_size=131072` → 4K tR + 128K 线上传数。
 
 ### 3.5 带宽统计
-- 读字节：每次读 DATA 完成时累加 `read_bytes_per_cmd`（= `block_size` 或 `cmd_size`）。
-- 写字节：每次写 DATA 完成时累加 `write_bytes_per_cmd`（= `block_size` 或 `page_size`）。
-- `MB/s = bytes / 稳态时间 × XOR_factor`；`ceiling` 为各 channel 传数速率之和。
+- 读字节：每次读 DATA 完成时累加 `read_bytes_per_cmd`（主机字节，不含 parity）。
+- 写字节：每次写 DATA 完成时累加 `write_bytes_per_cmd`。
+- **sim**：`bytes / 稳态时间 × XOR_factor`（与 IOPS 同因子）。
+- **ceiling wire**：各 channel 按 `(host+parity)` 传数时间求和的上限。
+- **ceiling host**：同一时间窗内仅计 host 字节的上限。
+- **ceiling xor**：wire × XOR_factor，与 sim 对比。
+
+### 3.6 与 fio / 实测对比（范围说明）
+本工具只建模 **NAND channel + die 调度**，不含 PCIe、DMA、对齐、文件系统与主机栈。
+- fio `128K sequential` 报告的是 **端到端** 带宽，通常 ≤ 本工具 **ceiling wire**。
+- 对比时建议：fio 使用相近 `numjobs`≈`chan_num`、`iodepth` 饱和；本工具用 `workload=fulldev_seq_*`、`block_size=128K`。
+- sim 接近 **ceiling xor** 或 **wire** 表示后端 channel 已饱和；明显低于 host ceiling 则查 tR/plane/调度。
 
 ## 4. Suspend 机制（读优先）
 当同一 die 上存在读与写/擦冲突时，读命令拥有最高优先级，可 **suspend**：

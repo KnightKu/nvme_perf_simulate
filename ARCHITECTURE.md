@@ -31,7 +31,7 @@ perf.conf      配置文件
 
 #### 统计
 - `perf_stats_t`：命令计数与 `read_bytes` / `write_bytes`
-- `perf_calc_iops()` / `perf_calc_bandwidth()`：稳态窗口内的 IOPS 与 MB/s
+- `perf_calc_iops()` / `perf_calc_bandwidth()`：IOPS；MB/s 含 sim/raw 与 wire/host/xor ceiling 利用率
 
 ## 3. 数据流
 ```

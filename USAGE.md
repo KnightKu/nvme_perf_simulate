@@ -20,24 +20,39 @@ make clean && make
 ## 3. 输出说明
 ```
 Performance = <total_iops> IOPS
-Read IOPS = <read_iops>
-Write IOPS = <write_iops>
-Erase IOPS = <erase_iops>
-Read Bandwidth = <read_mbps> MB/s (ceiling <read_ceiling> MB/s)
-Write Bandwidth = <write_mbps> MB/s (ceiling <write_ceiling> MB/s)
-Total Bandwidth = <total_mbps> MB/s
+Read/Write/Erase IOPS = ...
+Read Bandwidth (sim) = <MB/s with XOR>
+  sim(raw) = ... | ceiling wire = ... | host = ... | xor = ... MB/s
+  utilization: ...% wire | ...% host | ...% xor
+Write Bandwidth (sim) = ...（格式同上）
+Total Bandwidth (sim) = ...
 ```
 
-- **ceiling**：按 `chan_num` 与各 channel 的 `data_time` 估算的理论 channel 传数上限（未计 tR/cmd 争用）。
-- 带宽统计窗口与 IOPS 相同（warmup 之后 `start_time` ~ `end_time`），并应用与 IOPS 相同的 XOR 折减因子。
+| 字段 | 含义 |
+|------|------|
+| **sim** | 稳态窗口内主机字节带宽 × XOR（与 IOPS 同口径） |
+| **sim(raw)** | 未乘 XOR，便于对 wire ceiling |
+| **ceiling wire** | channel 上传 `(block+parity)` 的聚合线速上限 |
+| **ceiling host** | 相同传数时间、仅计 `block_size` 的上限 |
+| **ceiling xor** | wire × XOR，与 **sim** 对比 |
+| **utilization %** | sim(raw) 对 wire/host；sim 对 xor |
+
+### 与 fio 对比
+- 本工具 = **后端 NAND channel 极限**；fio = **端到端**。
+- 对齐建议：`fulldev_seq_read` / `fulldev_seq_write`，`block_size=131072`，`qd` 饱和，`numjobs≈chan_num`。
+- fio 带宽通常介于 sim 与 ceiling wire 之间；显著低于 host ceiling 时检查 `tR`（`cmd_size`）与 `block_size` 是否分开配置。
+
+### cmd_size 与 block_size
+- `cmd_size`：读 **tR**（4K → `tr_fast`）。
+- `block_size`：channel **传数**与带宽字节（如 128K 顺序带宽测试）。
 
 ## 4. 配置文件字段
 
 **时序/性能参数**
 - `cmd_overhead` / `cmd_overhead_sca` / `sca`
 - `chan_speed`：channel 速率（MT/s）
-- `cmd_size`：用于 tR 分支选择（4KiB 时用 `tr_fast`）
-- `block_size`：主机 IO 大小（字节）；`0` 表示读用 `cmd_size`、写用 `page_size`
+- `cmd_size`：读命令粒度，用于 **tR**（4096 → `tr_fast`）
+- `block_size`：channel 传数与带宽统计；`0` 表示读=`cmd_size`、写=`page_size`
 - `ecc_parity_size` / `page_size` / `page_parity_size`
 - `tr_fast` / `tr` / `tprog_eff` / `nand_type` / `terase`
 

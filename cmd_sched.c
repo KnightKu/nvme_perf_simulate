@@ -115,6 +115,11 @@ typedef struct perf_derived {
     int write_bytes_per_cmd;
     double read_ceiling_mbps;
     double write_ceiling_mbps;
+    double read_ceiling_host_mbps;
+    double write_ceiling_host_mbps;
+    double read_ceiling_xor_mbps;
+    double write_ceiling_xor_mbps;
+    double xor_factor;
     int die_per_chan;
     int max_planes_per_die;
 } perf_derived_t;
@@ -767,7 +772,8 @@ int perf_init(const perf_config_t *cfg) {
         } else {
             g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead * TIME_SCALE);
         }
-        if (read_sz == 4096) {
+        /* tR from cmd_size; channel data time from block_size (read_sz). */
+        if (cfg->cmd_size == 4096) {
             g_state.d.tread = (uint64_t)cfg->tr_fast * TIME_SCALE;
         } else {
             g_state.d.tread = (uint64_t)cfg->tR * TIME_SCALE;
@@ -780,12 +786,28 @@ int perf_init(const perf_config_t *cfg) {
             read_payload * TIME_SCALE / (uint64_t)cfg->chan_speed;
         g_state.d.data_time_write =
             write_payload * TIME_SCALE / (uint64_t)cfg->chan_speed;
+        {
+            int xor_ratio =
+                (cfg->die_num > 64) ? 64 : cfg->die_num;
+            g_state.d.xor_factor =
+                ((double)xor_ratio - 1) / (double)xor_ratio;
+        }
         g_state.d.read_ceiling_mbps =
             (double)cfg->chan_num *
             channel_payload_mbps(read_payload, g_state.d.data_time_read);
         g_state.d.write_ceiling_mbps =
             (double)cfg->chan_num *
             channel_payload_mbps(write_payload, g_state.d.data_time_write);
+        g_state.d.read_ceiling_host_mbps =
+            (double)cfg->chan_num *
+            channel_payload_mbps((uint64_t)read_sz, g_state.d.data_time_read);
+        g_state.d.write_ceiling_host_mbps =
+            (double)cfg->chan_num *
+            channel_payload_mbps((uint64_t)write_sz, g_state.d.data_time_write);
+        g_state.d.read_ceiling_xor_mbps =
+            g_state.d.read_ceiling_mbps * g_state.d.xor_factor;
+        g_state.d.write_ceiling_xor_mbps =
+            g_state.d.write_ceiling_mbps * g_state.d.xor_factor;
     }
     // data_time_* models payload + parity transfer on channel.
 
@@ -1140,11 +1162,18 @@ void perf_run(perf_stats_t *stats) {
     }
 }
 
+static double pct_of(double sim, double ceiling) {
+    if (ceiling <= 0.0) {
+        return 0.0;
+    }
+    return sim / ceiling * 100.0;
+}
+
 perf_bandwidth_t perf_calc_bandwidth(const perf_stats_t *stats) {
     perf_bandwidth_t bw = {0.0, 0.0, 0.0, 0.0, 0.0};
     double elapsed_us;
-    int xor_ratio;
     double xor_factor;
+    double bytes_to_mbps;
 
     if (!stats || !g_state.initialized) {
         return bw;
@@ -1152,6 +1181,10 @@ perf_bandwidth_t perf_calc_bandwidth(const perf_stats_t *stats) {
 
     bw.read_ceiling_mbps = g_state.d.read_ceiling_mbps;
     bw.write_ceiling_mbps = g_state.d.write_ceiling_mbps;
+    bw.read_ceiling_host_mbps = g_state.d.read_ceiling_host_mbps;
+    bw.write_ceiling_host_mbps = g_state.d.write_ceiling_host_mbps;
+    bw.read_ceiling_xor_mbps = g_state.d.read_ceiling_xor_mbps;
+    bw.write_ceiling_xor_mbps = g_state.d.write_ceiling_xor_mbps;
 
     if (stats->end_time <= stats->start_time) {
         return bw;
@@ -1163,16 +1196,22 @@ perf_bandwidth_t perf_calc_bandwidth(const perf_stats_t *stats) {
         return bw;
     }
 
-    xor_ratio = (g_state.cfg.die_num > 64) ? 64 : g_state.cfg.die_num;
-    xor_factor = ((double)xor_ratio - 1) / (double)xor_ratio;
+    xor_factor = g_state.d.xor_factor;
+    bytes_to_mbps = 1000000.0 / 1048576.0 / elapsed_us;
 
-    bw.read_mbps =
-        (double)stats->read_bytes / elapsed_us * 1000000.0 / 1048576.0 *
-        xor_factor;
-    bw.write_mbps =
-        (double)stats->write_bytes / elapsed_us * 1000000.0 / 1048576.0 *
-        xor_factor;
+    bw.read_mbps_raw = (double)stats->read_bytes * bytes_to_mbps;
+    bw.write_mbps_raw = (double)stats->write_bytes * bytes_to_mbps;
+    bw.read_mbps = bw.read_mbps_raw * xor_factor;
+    bw.write_mbps = bw.write_mbps_raw * xor_factor;
     bw.total_mbps = bw.read_mbps + bw.write_mbps;
+
+    bw.read_util_wire_pct = pct_of(bw.read_mbps_raw, bw.read_ceiling_mbps);
+    bw.read_util_host_pct = pct_of(bw.read_mbps_raw, bw.read_ceiling_host_mbps);
+    bw.read_util_xor_pct = pct_of(bw.read_mbps, bw.read_ceiling_xor_mbps);
+    bw.write_util_wire_pct = pct_of(bw.write_mbps_raw, bw.write_ceiling_mbps);
+    bw.write_util_host_pct =
+        pct_of(bw.write_mbps_raw, bw.write_ceiling_host_mbps);
+    bw.write_util_xor_pct = pct_of(bw.write_mbps, bw.write_ceiling_xor_mbps);
 
     return bw;
 }

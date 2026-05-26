@@ -2,6 +2,34 @@
 
 #include "cmd_sched.h"
 
+static void print_read_bandwidth(const perf_bandwidth_t *bw) {
+    printf("Read Bandwidth (sim) = %.2f MB/s\n", bw->read_mbps);
+    if (bw->read_ceiling_mbps <= 0.0 && bw->read_mbps <= 0.0) {
+        return;
+    }
+    printf("  sim(raw) = %.2f MB/s | ceiling wire = %.2f | host = %.2f | "
+           "xor = %.2f MB/s\n",
+           bw->read_mbps_raw, bw->read_ceiling_mbps, bw->read_ceiling_host_mbps,
+           bw->read_ceiling_xor_mbps);
+    printf("  utilization: %.1f%% wire | %.1f%% host | %.1f%% xor\n",
+           bw->read_util_wire_pct, bw->read_util_host_pct,
+           bw->read_util_xor_pct);
+}
+
+static void print_write_bandwidth(const perf_bandwidth_t *bw) {
+    printf("Write Bandwidth (sim) = %.2f MB/s\n", bw->write_mbps);
+    if (bw->write_ceiling_mbps <= 0.0 && bw->write_mbps <= 0.0) {
+        return;
+    }
+    printf("  sim(raw) = %.2f MB/s | ceiling wire = %.2f | host = %.2f | "
+           "xor = %.2f MB/s\n",
+           bw->write_mbps_raw, bw->write_ceiling_mbps,
+           bw->write_ceiling_host_mbps, bw->write_ceiling_xor_mbps);
+    printf("  utilization: %.1f%% wire | %.1f%% host | %.1f%% xor\n",
+           bw->write_util_wire_pct, bw->write_util_host_pct,
+           bw->write_util_xor_pct);
+}
+
 int main(int argc, char **argv) {
     perf_config_t cfg;
     perf_stats_t stats;
@@ -33,19 +61,9 @@ int main(int argc, char **argv) {
     printf("Write IOPS = %.2f\n", iops.write);
     printf("Erase IOPS = %.2f\n", iops.erase);
 
-    printf("Read Bandwidth = %.2f MB/s", bw.read_mbps);
-    if (bw.read_ceiling_mbps > 0.0) {
-        printf(" (ceiling %.2f MB/s)", bw.read_ceiling_mbps);
-    }
-    printf("\n");
-
-    printf("Write Bandwidth = %.2f MB/s", bw.write_mbps);
-    if (bw.write_ceiling_mbps > 0.0) {
-        printf(" (ceiling %.2f MB/s)", bw.write_ceiling_mbps);
-    }
-    printf("\n");
-
-    printf("Total Bandwidth = %.2f MB/s\n", bw.total_mbps);
+    print_read_bandwidth(&bw);
+    print_write_bandwidth(&bw);
+    printf("Total Bandwidth (sim) = %.2f MB/s\n", bw.total_mbps);
 
     perf_cleanup();
     return 0;
