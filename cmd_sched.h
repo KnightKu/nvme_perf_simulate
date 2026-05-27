@@ -22,9 +22,9 @@ typedef struct perf_config {
     int sca;                   // 0=off, 1=on
     int chan_speed;
     int cmd_size;          // NAND read cmd size for tR selection (tr_fast when 4096)
-    int block_size;        // host IO on channel + bandwidth bytes (0 -> cmd_size/page_size)
-    int ecc_parity_size;   // ECC parity size in bytes
-    int page_size;         // page data size in bytes (write)
+    int block_size;        // host IO bytes; must be N * page_size when > 0
+    int ecc_parity_size;   // ECC parity per read page (with page_size)
+    int page_size;         // NAND page size for per-page channel xfer
     int page_parity_size;  // page parity size in bytes (write)
     int tr_fast;           // tR for 4KiB cmd_size
     int tR;
