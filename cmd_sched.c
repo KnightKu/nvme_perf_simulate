@@ -1170,10 +1170,12 @@ static double pct_of(double sim, double ceiling) {
 }
 
 perf_bandwidth_t perf_calc_bandwidth(const perf_stats_t *stats) {
-    perf_bandwidth_t bw = {0};
+    perf_bandwidth_t bw;
     double elapsed_us;
     double xor_factor;
     double bytes_to_mbps;
+
+    memset(&bw, 0, sizeof(bw));
 
     if (!stats || !g_state.initialized) {
         return bw;
