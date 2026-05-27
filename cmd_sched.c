@@ -100,6 +100,7 @@ typedef struct chan_s {
     int die;
     int slot;
     uint64_t time;
+    int pages_left; /* pages remaining in current host block transfer */
 } chan_t;
 
 typedef struct perf_derived {
@@ -107,10 +108,15 @@ typedef struct perf_derived {
     uint64_t tread;
     uint64_t tprog;
     uint64_t terase;
-    uint64_t data_time_read;
-    uint64_t data_time_write;
+    uint64_t data_time_read_page;
+    uint64_t data_time_write_page;
+    uint64_t tprog_block;
+    int pages_per_block;
+    int page_unit;
     int read_xfer_size;
     int write_xfer_size;
+    int read_bytes_per_page;
+    int write_bytes_per_page;
     int read_bytes_per_cmd;
     int write_bytes_per_cmd;
     double read_ceiling_mbps;
@@ -403,10 +409,11 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
             if (ps->state == DIE_READ_WAIT && cur_time >= ps->time) {
-                // Read data transfer uses channel bandwidth.
+                // Read data: one or more page transfers per host block.
                 g_state.chan[chan_id].state = CHAN_DATA;
+                g_state.chan[chan_id].pages_left = g_state.d.pages_per_block;
                 g_state.chan[chan_id].time =
-                    cur_time + g_state.d.data_time_read;
+                    cur_time + g_state.d.data_time_read_page;
                 g_state.chan[chan_id].act = ps->act;
                 g_state.chan[chan_id].op = OP_READ;
                 g_state.chan[chan_id].die = die;
@@ -431,10 +438,11 @@ static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
             if (ps->state == DIE_WRITE_DATA_READY) {
-                // Program data transfer uses channel bandwidth.
+                // Program data: one page per channel DATA phase.
                 g_state.chan[chan_id].state = CHAN_DATA;
+                g_state.chan[chan_id].pages_left = g_state.d.pages_per_block;
                 g_state.chan[chan_id].time =
-                    cur_time + g_state.d.data_time_write;
+                    cur_time + g_state.d.data_time_write_page;
                 g_state.chan[chan_id].act = ps->act;
                 g_state.chan[chan_id].op = OP_WRITE;
                 g_state.chan[chan_id].die = die;
@@ -730,6 +738,9 @@ int perf_init(const perf_config_t *cfg) {
     if (cfg->block_size < 0) {
         return -1;
     }
+    if (cfg->block_size > 0 && cfg->block_size % cfg->page_size != 0) {
+        return -1;
+    }
 
     memset(&g_state, 0, sizeof(g_state));
     g_state.cfg = *cfg;
@@ -754,17 +765,35 @@ int perf_init(const perf_config_t *cfg) {
             cfg->block_size > 0 ? cfg->block_size : cfg->cmd_size;
         int write_sz =
             cfg->block_size > 0 ? cfg->block_size : cfg->page_size;
-        uint64_t read_payload;
-        uint64_t write_payload;
+        int page_unit = cfg->page_size;
+        int pages_per_block;
+        int read_page_bytes;
+        int write_page_bytes;
+        uint64_t read_wire_page;
+        uint64_t write_wire_page;
 
+        if (cfg->block_size > 0) {
+            pages_per_block = cfg->block_size / cfg->page_size;
+            read_page_bytes = cfg->page_size;
+            write_page_bytes = cfg->page_size;
+        } else {
+            pages_per_block = 1;
+            read_page_bytes = cfg->cmd_size;
+            write_page_bytes = cfg->page_size;
+        }
+
+        g_state.d.pages_per_block = pages_per_block;
+        g_state.d.page_unit = page_unit;
         g_state.d.read_xfer_size = read_sz;
         g_state.d.write_xfer_size = write_sz;
+        g_state.d.read_bytes_per_page = read_page_bytes;
+        g_state.d.write_bytes_per_page = write_page_bytes;
         g_state.d.read_bytes_per_cmd = read_sz;
         g_state.d.write_bytes_per_cmd = write_sz;
-        read_payload =
-            (uint64_t)read_sz + (uint64_t)cfg->ecc_parity_size;
-        write_payload =
-            (uint64_t)write_sz + (uint64_t)cfg->page_parity_size;
+        read_wire_page =
+            (uint64_t)read_page_bytes + (uint64_t)cfg->ecc_parity_size;
+        write_wire_page =
+            (uint64_t)write_page_bytes + (uint64_t)cfg->page_parity_size;
 
         if (cfg->sca) {
             g_state.d.cmd_time =
@@ -772,7 +801,7 @@ int perf_init(const perf_config_t *cfg) {
         } else {
             g_state.d.cmd_time = (uint64_t)(cfg->cmd_overhead * TIME_SCALE);
         }
-        /* tR from cmd_size; channel data time from block_size (read_sz). */
+        /* tR from cmd_size; each page xfer uses page_size + parity per page. */
         if (cfg->cmd_size == 4096) {
             g_state.d.tread = (uint64_t)cfg->tr_fast * TIME_SCALE;
         } else {
@@ -781,35 +810,40 @@ int perf_init(const perf_config_t *cfg) {
         g_state.d.tprog =
             (uint64_t)((uint64_t)cfg->tprog_eff * (uint64_t)cfg->nand_type) *
             TIME_SCALE;
+        g_state.d.tprog_block = g_state.d.tprog * (uint64_t)pages_per_block;
         g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
-        g_state.d.data_time_read =
-            read_payload * TIME_SCALE / (uint64_t)cfg->chan_speed;
-        g_state.d.data_time_write =
-            write_payload * TIME_SCALE / (uint64_t)cfg->chan_speed;
+        g_state.d.data_time_read_page =
+            read_wire_page * TIME_SCALE / (uint64_t)cfg->chan_speed;
+        g_state.d.data_time_write_page =
+            write_wire_page * TIME_SCALE / (uint64_t)cfg->chan_speed;
         {
             int xor_ratio =
                 (cfg->die_num > 64) ? 64 : cfg->die_num;
             g_state.d.xor_factor =
                 ((double)xor_ratio - 1) / (double)xor_ratio;
         }
+        /* Per-page wire rate × channels (steady page stream on each ch). */
         g_state.d.read_ceiling_mbps =
             (double)cfg->chan_num *
-            channel_payload_mbps(read_payload, g_state.d.data_time_read);
+            channel_payload_mbps(read_wire_page, g_state.d.data_time_read_page);
         g_state.d.write_ceiling_mbps =
             (double)cfg->chan_num *
-            channel_payload_mbps(write_payload, g_state.d.data_time_write);
+            channel_payload_mbps(write_wire_page,
+                                 g_state.d.data_time_write_page);
         g_state.d.read_ceiling_host_mbps =
             (double)cfg->chan_num *
-            channel_payload_mbps((uint64_t)read_sz, g_state.d.data_time_read);
+            channel_payload_mbps((uint64_t)read_page_bytes,
+                                 g_state.d.data_time_read_page);
         g_state.d.write_ceiling_host_mbps =
             (double)cfg->chan_num *
-            channel_payload_mbps((uint64_t)write_sz, g_state.d.data_time_write);
+            channel_payload_mbps((uint64_t)write_page_bytes,
+                                 g_state.d.data_time_write_page);
         g_state.d.read_ceiling_xor_mbps =
             g_state.d.read_ceiling_mbps * g_state.d.xor_factor;
         g_state.d.write_ceiling_xor_mbps =
             g_state.d.write_ceiling_mbps * g_state.d.xor_factor;
     }
-    // data_time_* models payload + parity transfer on channel.
+    // data_time_*_page: one page (page_size + parity) on channel per phase.
 
     g_state.map = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_op = (int *)calloc(cfg->qd, sizeof(int));
@@ -871,6 +905,7 @@ int perf_init(const perf_config_t *cfg) {
         g_state.chan[i].op = OP_READ;
         g_state.chan[i].die = -1;
         g_state.chan[i].slot = -1;
+        g_state.chan[i].pages_left = 0;
         g_state.rr_die[i] = 0;
     }
 
@@ -1069,12 +1104,21 @@ void perf_run(perf_stats_t *stats) {
                         if (g_state.chan[i].op == OP_READ) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+
+                            read_bytes +=
+                                (uint64_t)g_state.d.read_bytes_per_page;
+                            if (g_state.chan[i].pages_left > 1) {
+                                g_state.chan[i].pages_left--;
+                                g_state.chan[i].time =
+                                    cur_time + g_state.d.data_time_read_page;
+                                progressed = 1;
+                                break;
+                            }
+
                             g_state.map[g_state.chan[i].act] = 0;
                             inflight_cmds--;
                             total_cmd++;
                             read_cmd++;
-                            read_bytes +=
-                                (uint64_t)g_state.d.read_bytes_per_cmd;
                             if (ctx->suspended_op != OP_MAX) {
                                 plane_slot_t *sps =
                                     slot_at(ctx, ctx->suspended_slot);
@@ -1098,16 +1142,26 @@ void perf_run(perf_stats_t *stats) {
                         } else if (g_state.chan[i].op == OP_WRITE) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
-                            ps->state = DIE_WRITE_WAIT;
-                            ps->time = cur_time + g_state.d.tprog;
+
                             write_bytes +=
-                                (uint64_t)g_state.d.write_bytes_per_cmd;
+                                (uint64_t)g_state.d.write_bytes_per_page;
+                            if (g_state.chan[i].pages_left > 1) {
+                                g_state.chan[i].pages_left--;
+                                g_state.chan[i].time =
+                                    cur_time + g_state.d.data_time_write_page;
+                                progressed = 1;
+                                break;
+                            }
+
+                            ps->state = DIE_WRITE_WAIT;
+                            ps->time = cur_time + g_state.d.tprog_block;
                         }
                         g_state.chan[i].act = 0xFFF;
                         g_state.chan[i].state = CHAN_IDLE;
                         g_state.chan[i].op = OP_READ;
                         g_state.chan[i].die = -1;
                         g_state.chan[i].slot = -1;
+                        g_state.chan[i].pages_left = 0;
                         progressed = 1;
                     }
                     break;

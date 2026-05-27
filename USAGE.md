@@ -51,8 +51,10 @@ Total Bandwidth (sim) = ...
 **时序/性能参数**
 - `cmd_overhead` / `cmd_overhead_sca` / `sca`
 - `chan_speed`：channel 速率（MT/s）
-- `cmd_size`：读命令粒度，用于 **tR**（4096 → `tr_fast`）
-- `block_size`：channel 传数与带宽统计；`0` 表示读=`cmd_size`、写=`page_size`
+- `cmd_size`：读 **tR**（4096 → `tr_fast`）
+- `page_size`：NAND 页大小（如 16384）；每页写线速含 `page_parity_size`（如 1952）
+- `block_size`：主机 IO 总大小，须为 `page_size` 整数倍；按页多次 `CHAN_DATA`
+- `block_size=0`：legacy 单页（读=`cmd_size`+`ecc_parity_size`，写=`page_size`+`page_parity_size`）
 - `ecc_parity_size` / `page_size` / `page_parity_size`
 - `tr_fast` / `tr` / `tprog_eff` / `nand_type` / `terase`
 
@@ -115,3 +117,4 @@ cmd_size=4096
 - **配置文件加载失败**：检查 key 拼写、`workload`/`stripe_mode`/`io_pattern` 取值。
 - **带宽远低于 ceiling**：多为 tR、plane 槽或 channel 仲裁争用；可增大 `block_size` 或检查 `iwl_slot`。
 - **plane 并发限制**：`die_num * plane > iwl_slot` 时要求 `iwl_slot / die_num` 为 2 的幂。
+- **`block_size` 非 `page_size` 整数倍**：`perf_init` 失败。

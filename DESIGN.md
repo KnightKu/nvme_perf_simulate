@@ -36,15 +36,17 @@
 - `channel_major`：`rr_chan` 轮询 channel，每 channel 的 `stripe_cursor[ch]` 递增 die。
 - `global_die` + `io_pattern`：`random` 或 global die `sequential`。
 
-**块大小与 tR（cmd_size 与 block_size 拆分）**
-- `cmd_size`：仅用于读 **tR** 选择（`cmd_size==4096` → `tr_fast`，否则 `tR`）。
-- `block_size`：用于 **channel 传数时间** `data_time_*` 与带宽字节统计；
-  `block_size=0` 时读回退 `cmd_size`，写回退 `page_size`。
-- 典型全盘顺序读：`cmd_size=4096`、`block_size=131072` → 4K tR + 128K 线上传数。
+**块大小与 tR（cmd_size / block_size / page_size）**
+- `cmd_size`：仅用于读 **tR**（`4096` → `tr_fast`）。
+- `block_size`：主机 IO 总字节；须为 `page_size` 整数倍（`block_size=0` 时 legacy 单页）。
+- 传数按页拆分：`pages_per_block = block_size / page_size`，每页一次 `CHAN_DATA`。
+- 读每页线速：`page_size + ecc_parity_size`；写每页：`page_size + page_parity_size`（如 16K+1952）。
+- 写 tPROG：`tprog × pages_per_block`（整块 program 等待）。
+- 例：`block_size=131072`、`page_size=16384` → 8 次页传数 + 一次 tR/块。
 
 ### 3.5 带宽统计
-- 读字节：每次读 DATA 完成时累加 `read_bytes_per_cmd`（主机字节，不含 parity）。
-- 写字节：每次写 DATA 完成时累加 `write_bytes_per_cmd`。
+- 读/写字节：每完成一页 DATA 累加 `read_bytes_per_page` / `write_bytes_per_page`（= `page_size`）。
+- 整块完成时累计等于 `block_size`。
 - **sim**：`bytes / 稳态时间 × XOR_factor`（与 IOPS 同因子）。
 - **ceiling wire**：各 channel 按 `(host+parity)` 传数时间求和的上限。
 - **ceiling host**：同一时间窗内仅计 host 字节的上限。
