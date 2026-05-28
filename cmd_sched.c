@@ -78,6 +78,7 @@ typedef struct plane_slot_s {
     int state;
     int act;
     uint64_t time;
+    int host_pages_left; /* host write: pages left after current tPROG */
 } plane_slot_t;
 
 typedef struct die_ctx_s {
@@ -110,7 +111,6 @@ typedef struct perf_derived {
     uint64_t terase;
     uint64_t data_time_read_page;
     uint64_t data_time_write_page;
-    uint64_t tprog_block;
     int pages_per_block;
     int page_unit;
     int read_xfer_size;
@@ -300,8 +300,19 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                  ps->state == DIE_ERASE_WAIT) &&
                 ps->act != 0xFFF && cur_time >= ps->time) {
                 int act = ps->act;
+
+                if (ps->state == DIE_WRITE_WAIT &&
+                    g_state.cmd_op[act] == OP_WRITE &&
+                    ps->host_pages_left > 1) {
+                    ps->host_pages_left--;
+                    ps->state = DIE_WRITE_DATA_READY;
+                    completed++;
+                    continue;
+                }
+
                 ps->act = 0xFFF;
                 ps->state = DIE_IDLE;
+                ps->host_pages_left = 0;
                 g_state.map[act] = 0;
                 (*inflight_cmds)--;
                 (*total_cmd)++;
@@ -810,7 +821,6 @@ int perf_init(const perf_config_t *cfg) {
         g_state.d.tprog =
             (uint64_t)((uint64_t)cfg->tprog_eff * (uint64_t)cfg->nand_type) *
             TIME_SCALE;
-        g_state.d.tprog_block = g_state.d.tprog * (uint64_t)pages_per_block;
         g_state.d.terase = (uint64_t)cfg->tERASE * TIME_SCALE;
         g_state.d.data_time_read_page =
             read_wire_page * TIME_SCALE / (uint64_t)cfg->chan_speed;
@@ -880,6 +890,7 @@ int perf_init(const perf_config_t *cfg) {
                 ctx->slots[slot_idx].state = DIE_IDLE;
                 ctx->slots[slot_idx].act = 0xFFF;
                 ctx->slots[slot_idx].time = 0;
+                ctx->slots[slot_idx].host_pages_left = 0;
             }
             ctx->suspended_slot = -1;
             ctx->suspended_act = 0xFFF;
@@ -1078,6 +1089,7 @@ void perf_run(perf_stats_t *stats) {
                         } else if (g_state.chan[i].op == OP_WRITE) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+                            ps->host_pages_left = g_state.d.pages_per_block;
                             ps->state = DIE_WRITE_DATA_READY;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
@@ -1145,16 +1157,8 @@ void perf_run(perf_stats_t *stats) {
 
                             write_bytes +=
                                 (uint64_t)g_state.d.write_bytes_per_page;
-                            if (g_state.chan[i].pages_left > 1) {
-                                g_state.chan[i].pages_left--;
-                                g_state.chan[i].time =
-                                    cur_time + g_state.d.data_time_write_page;
-                                progressed = 1;
-                                break;
-                            }
-
                             ps->state = DIE_WRITE_WAIT;
-                            ps->time = cur_time + g_state.d.tprog_block;
+                            ps->time = cur_time + g_state.d.tprog;
                         }
                         g_state.chan[i].act = 0xFFF;
                         g_state.chan[i].state = CHAN_IDLE;

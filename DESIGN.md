@@ -41,7 +41,7 @@
 - `block_size`：主机 IO 总字节；须为 `page_size` 整数倍（`block_size=0` 时 legacy 单页）。
 - 传数按页拆分：`pages_per_block = block_size / page_size`，每页一次 `CHAN_DATA`。
 - 读每页线速：`page_size + ecc_parity_size`；写每页：`page_size + page_parity_size`（如 16K+1952）。
-- 写 tPROG：`tprog × pages_per_block`（整块 program 等待）。
+- 写 tPROG：**每页**一次 `tprog`；`host_pages_left` 未归零前不释放 host 命令（仍计 1 次 write IOPS）。
 - 例：`block_size=131072`、`page_size=16384` → 8 次页传数 + 一次 tR/块。
 
 ### 3.5 带宽统计
