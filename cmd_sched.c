@@ -36,6 +36,7 @@ enum STRIPE_MODE {
     STRIPE_CHANNEL_MAJOR = PERF_STRIPE_CHANNEL_MAJOR,
     STRIPE_GLOBAL_DIE = PERF_STRIPE_GLOBAL_DIE,
     STRIPE_PAGE_ACROSS_CHAN = PERF_STRIPE_PAGE_ACROSS_CHAN,
+    STRIPE_PAGE_DIE_ROTATE = PERF_STRIPE_PAGE_DIE_ROTATE,
 };
 
 enum WORKLOAD {
@@ -238,24 +239,36 @@ static inline int select_prio() {
 }
 
 static inline int effective_stripe_mode(void) {
-    if (g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_READ ||
-        g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_WRITE) {
+    if (g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_READ) {
         return STRIPE_PAGE_ACROSS_CHAN;
+    }
+    if (g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_WRITE) {
+        return STRIPE_PAGE_DIE_ROTATE;
     }
     return g_state.cfg.stripe_mode;
 }
 
-static inline int use_page_across_chan_stripe(void) {
-    return effective_stripe_mode() == STRIPE_PAGE_ACROSS_CHAN &&
+static inline int use_page_block_stripe(void) {
+    int mode = effective_stripe_mode();
+
+    return (mode == STRIPE_PAGE_ACROSS_CHAN ||
+            mode == STRIPE_PAGE_DIE_ROTATE) &&
            g_state.cfg.block_size > 0 &&
            g_state.d.pages_per_block > 1;
 }
 
-static inline void stripe_page_target(int stripe_idx, int *chan_id,
-                                      int *die_in_chan) {
+static inline void stripe_page_target(int stripe_base, int page_idx,
+                                      int *chan_id, int *die_in_chan) {
+    int stripe_idx = stripe_base + page_idx;
+
     *chan_id = stripe_idx % g_state.cfg.chan_num;
-    *die_in_chan =
-        (stripe_idx / g_state.cfg.chan_num) % g_state.d.die_per_chan;
+    if (effective_stripe_mode() == STRIPE_PAGE_DIE_ROTATE) {
+        *die_in_chan = (stripe_base / g_state.cfg.chan_num + page_idx) %
+                       g_state.d.die_per_chan;
+    } else {
+        *die_in_chan =
+            (stripe_idx / g_state.cfg.chan_num) % g_state.d.die_per_chan;
+    }
 }
 
 static inline void complete_host_page_stripe(int act, int op,
@@ -283,7 +296,7 @@ static int try_launch_striped_page(int act, int op, int page_idx,
     die_ctx_t *ctx;
     plane_slot_t *ps;
 
-    stripe_page_target(base + page_idx, &ch, &die);
+    stripe_page_target(base, page_idx, &ch, &die);
     if (g_state.chan[ch].state != CHAN_IDLE) {
         return 0;
     }
@@ -326,7 +339,7 @@ static int try_launch_striped_write_data_page(int act, int page_idx,
     plane_slot_t *ps;
 
     (void)cur_time;
-    stripe_page_target(base + page_idx, &ch, &die);
+    stripe_page_target(base, page_idx, &ch, &die);
     ctx = die_ctx_at(ch, die);
     for (s = 0; s < ctx->slot_count; s++) {
         if (slot_at(ctx, s)->state == DIE_IDLE) {
@@ -799,6 +812,10 @@ static int set_config_value(perf_config_t *cfg, const char *key,
                    strcmp(value, "page_stripe") == 0) {
             cfg->stripe_mode = PERF_STRIPE_PAGE_ACROSS_CHAN;
             end = (char *)(value + strlen(value));
+        } else if (strcmp(value, "page_die_rotate") == 0 ||
+                   strcmp(value, "die_rotate") == 0) {
+            cfg->stripe_mode = PERF_STRIPE_PAGE_DIE_ROTATE;
+            end = (char *)(value + strlen(value));
         } else {
             return -1;
         }
@@ -953,7 +970,8 @@ int perf_init(const perf_config_t *cfg) {
     }
     if (cfg->stripe_mode != PERF_STRIPE_CHANNEL_MAJOR &&
         cfg->stripe_mode != PERF_STRIPE_GLOBAL_DIE &&
-        cfg->stripe_mode != PERF_STRIPE_PAGE_ACROSS_CHAN) {
+        cfg->stripe_mode != PERF_STRIPE_PAGE_ACROSS_CHAN &&
+        cfg->stripe_mode != PERF_STRIPE_PAGE_DIE_ROTATE) {
         return -1;
     }
     if (cfg->workload != PERF_WORKLOAD_LEGACY &&
@@ -1219,7 +1237,7 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
             act = i;
             g_state.cmd_op[act] = op;
             g_state.cmd_prio[act] = prio;
-            if (use_page_across_chan_stripe()) {
+            if (use_page_block_stripe()) {
                 g_state.cmd_stripe_base[act] = g_state.global_page_stripe;
                 g_state.global_page_stripe += g_state.d.pages_per_block;
                 g_state.cmd_pages_done[act] = 0;
@@ -1227,7 +1245,7 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
                 g_state.cmd_write_cmd_sent[act] = 0;
                 g_state.cmd_write_cmd_done[act] = 0;
                 g_state.cmd_page_stripe[act] = 1;
-                stripe_page_target(g_state.cmd_stripe_base[act], &chan_id,
+                stripe_page_target(g_state.cmd_stripe_base[act], 0, &chan_id,
                                    &die_in_chan);
             } else {
                 g_state.cmd_page_stripe[act] = 0;
