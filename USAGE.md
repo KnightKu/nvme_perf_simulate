@@ -66,13 +66,14 @@ Total Bandwidth (sim) = ...
 
 **Workload（负载类型）**
 - `legacy` / `mixed` / `default`：按 ratio 随机 read/write/erase
-- `fulldev_seq_read` / `seq_read_bw`：全盘顺序读极限（固定 read，channel stripe）
-- `fulldev_seq_write` / `seq_write_bw`：全盘顺序写极限（固定 write，channel stripe）
+- `fulldev_seq_read` / `seq_read_bw`：全盘顺序读极限（固定 read，**page 跨 channel stripe**）
+- `fulldev_seq_write` / `seq_write_bw`：全盘顺序写极限（固定 write，**page 跨 channel stripe**）
 
 **Stripe / IO pattern**
 - `stripe_mode`：
-  - `channel_major`（默认）：round-robin channel，每 channel 内 die 递增
-  - `global_die`：使用 `io_pattern` 的 global die 顺序
+  - `page_across_chan` / `page_stripe`：block 内每 page 映射不同 channel（fulldev 默认）
+  - `channel_major` / `channel`：命令级 channel 轮询（legacy）
+  - `global_die` / `die`：global die 顺序
 - `io_pattern`（`stripe_mode=global_die` 或 legacy 时）：
   - `random` / `sequential`（`seq`）
 
@@ -90,7 +91,7 @@ Total Bandwidth (sim) = ...
 ```ini
 workload=fulldev_seq_read
 block_size=131072
-stripe_mode=channel_major
+stripe_mode=page_across_chan
 qd=1024
 chan_num=16
 read_ratio=100
@@ -99,8 +100,8 @@ read_ratio=100
 **全盘顺序写极限**
 ```ini
 workload=fulldev_seq_write
-block_size=16384
-stripe_mode=channel_major
+block_size=131072
+stripe_mode=page_across_chan
 write_ratio=100
 read_ratio=0
 ```

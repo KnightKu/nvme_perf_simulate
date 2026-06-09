@@ -35,6 +35,7 @@ enum IO_PATTERN {
 enum STRIPE_MODE {
     STRIPE_CHANNEL_MAJOR = PERF_STRIPE_CHANNEL_MAJOR,
     STRIPE_GLOBAL_DIE = PERF_STRIPE_GLOBAL_DIE,
+    STRIPE_PAGE_ACROSS_CHAN = PERF_STRIPE_PAGE_ACROSS_CHAN,
 };
 
 enum WORKLOAD {
@@ -78,7 +79,8 @@ typedef struct plane_slot_s {
     int state;
     int act;
     uint64_t time;
-    int host_pages_left; /* host write: pages left after current tPROG */
+    int host_pages_left; /* legacy write: pages left after current tPROG */
+    int page_idx;        /* page index within host block (-1 if unused) */
 } plane_slot_t;
 
 typedef struct die_ctx_s {
@@ -139,6 +141,11 @@ typedef struct perf_state {
     die_ctx_t *die_ctx;
     int *rr_die;
     int *stripe_cursor;
+    int *cmd_stripe_base;
+    int *cmd_pages_done;
+    int *cmd_pages_launched;
+    int *cmd_page_stripe;
+    int global_page_stripe;
     int rr_chan;
     chan_t *chan;
     int next_die;
@@ -231,9 +238,112 @@ static inline int select_prio() {
 static inline int effective_stripe_mode(void) {
     if (g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_READ ||
         g_state.cfg.workload == WORKLOAD_FULLDEV_SEQ_WRITE) {
-        return STRIPE_CHANNEL_MAJOR;
+        return STRIPE_PAGE_ACROSS_CHAN;
     }
     return g_state.cfg.stripe_mode;
+}
+
+static inline int use_page_across_chan_stripe(void) {
+    return effective_stripe_mode() == STRIPE_PAGE_ACROSS_CHAN &&
+           g_state.cfg.block_size > 0 &&
+           g_state.d.pages_per_block > 1;
+}
+
+static inline void stripe_page_target(int stripe_idx, int *chan_id,
+                                      int *die_in_chan) {
+    *chan_id = stripe_idx % g_state.cfg.chan_num;
+    *die_in_chan =
+        (stripe_idx / g_state.cfg.chan_num) % g_state.d.die_per_chan;
+}
+
+static inline void complete_host_page_stripe(int act, int op,
+                                             int *inflight_cmds,
+                                             uint64_t *total_cmd,
+                                             uint64_t *read_cmd,
+                                             uint64_t *write_cmd) {
+    g_state.map[act] = 0;
+    (*inflight_cmds)--;
+    (*total_cmd)++;
+    if (op == OP_READ) {
+        (*read_cmd)++;
+    } else if (op == OP_WRITE) {
+        (*write_cmd)++;
+    }
+}
+
+static int try_launch_striped_page(int act, int op, int page_idx,
+                                   uint64_t cur_time) {
+    int base = g_state.cmd_stripe_base[act];
+    int ch;
+    int die;
+    int s;
+    int slot = -1;
+    die_ctx_t *ctx;
+    plane_slot_t *ps;
+
+    stripe_page_target(base + page_idx, &ch, &die);
+    if (g_state.chan[ch].state != CHAN_IDLE) {
+        return 0;
+    }
+
+    ctx = die_ctx_at(ch, die);
+    for (s = 0; s < ctx->slot_count; s++) {
+        if (slot_at(ctx, s)->state == DIE_IDLE) {
+            slot = s;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return 0;
+    }
+
+    ps = slot_at(ctx, slot);
+    ps->act = act;
+    ps->page_idx = page_idx;
+    ps->host_pages_left = 0;
+    ps->state = DIE_CMD;
+
+    g_state.chan[ch].state = CHAN_CMD;
+    g_state.chan[ch].time = cur_time + g_state.d.cmd_time;
+    g_state.chan[ch].act = act;
+    g_state.chan[ch].op = op;
+    g_state.chan[ch].die = die;
+    g_state.chan[ch].slot = slot;
+    g_state.chan[ch].pages_left = 0;
+    return 1;
+}
+
+static int try_launch_striped_pages(int act, int op, uint64_t cur_time) {
+    int started = 0;
+
+    while (g_state.cmd_pages_launched[act] < g_state.d.pages_per_block) {
+        int p = g_state.cmd_pages_launched[act];
+
+        if (!try_launch_striped_page(act, op, p, cur_time)) {
+            break;
+        }
+        g_state.cmd_pages_launched[act]++;
+        started = 1;
+    }
+    return started;
+}
+
+static int try_launch_pending_page_stripes(uint64_t cur_time) {
+    int act;
+    int started = 0;
+
+    for (act = 0; act < g_state.cfg.qd; act++) {
+        if (!g_state.map[act] || !g_state.cmd_page_stripe[act]) {
+            continue;
+        }
+        if (g_state.cmd_pages_launched[act] >= g_state.d.pages_per_block) {
+            continue;
+        }
+        if (try_launch_striped_pages(act, g_state.cmd_op[act], cur_time)) {
+            started = 1;
+        }
+    }
+    return started;
 }
 
 static inline void select_target(int *chan_id, int *die_in_chan) {
@@ -303,6 +413,7 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
 
                 if (ps->state == DIE_WRITE_WAIT &&
                     g_state.cmd_op[act] == OP_WRITE &&
+                    !g_state.cmd_page_stripe[act] &&
                     ps->host_pages_left > 1) {
                     ps->host_pages_left--;
                     ps->state = DIE_WRITE_DATA_READY;
@@ -310,8 +421,28 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                     continue;
                 }
 
+                if (ps->state == DIE_WRITE_WAIT &&
+                    g_state.cmd_op[act] == OP_WRITE &&
+                    g_state.cmd_page_stripe[act]) {
+                    g_state.cmd_pages_done[act]++;
+                    ps->act = 0xFFF;
+                    ps->state = DIE_IDLE;
+                    ps->page_idx = -1;
+                    ps->host_pages_left = 0;
+                    if (g_state.cmd_pages_done[act] <
+                        g_state.d.pages_per_block) {
+                        completed++;
+                        continue;
+                    }
+                    complete_host_page_stripe(act, OP_WRITE, inflight_cmds,
+                                              total_cmd, NULL, write_cmd);
+                    completed++;
+                    continue;
+                }
+
                 ps->act = 0xFFF;
                 ps->state = DIE_IDLE;
+                ps->page_idx = -1;
                 ps->host_pages_left = 0;
                 g_state.map[act] = 0;
                 (*inflight_cmds)--;
@@ -393,7 +524,14 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
             }
 
             act = queue_pop(q);
+            if (g_state.cmd_page_stripe[act]) {
+                g_state.rr_die[chan_id] =
+                    (die + 1) % g_state.d.die_per_chan;
+                return try_launch_striped_pages(act, op, cur_time);
+            }
+
             slot_at(ctx, slot)->act = act;
+            slot_at(ctx, slot)->page_idx = -1;
             slot_at(ctx, slot)->state = DIE_CMD;
 
             g_state.chan[chan_id].state = CHAN_CMD;
@@ -420,9 +558,12 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
             if (ps->state == DIE_READ_WAIT && cur_time >= ps->time) {
-                // Read data: one or more page transfers per host block.
                 g_state.chan[chan_id].state = CHAN_DATA;
-                g_state.chan[chan_id].pages_left = g_state.d.pages_per_block;
+                if (g_state.cmd_page_stripe[ps->act]) {
+                    g_state.chan[chan_id].pages_left = 0;
+                } else {
+                    g_state.chan[chan_id].pages_left = g_state.d.pages_per_block;
+                }
                 g_state.chan[chan_id].time =
                     cur_time + g_state.d.data_time_read_page;
                 g_state.chan[chan_id].act = ps->act;
@@ -449,9 +590,8 @@ static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
             if (ps->state == DIE_WRITE_DATA_READY) {
-                // Program data: one page per channel DATA phase.
                 g_state.chan[chan_id].state = CHAN_DATA;
-                g_state.chan[chan_id].pages_left = g_state.d.pages_per_block;
+                g_state.chan[chan_id].pages_left = 0;
                 g_state.chan[chan_id].time =
                     cur_time + g_state.d.data_time_write_page;
                 g_state.chan[chan_id].act = ps->act;
@@ -576,7 +716,7 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         } else {
             return -1;
         }
-    } else if (strcmp(key, "stripe_mode") == 0) {
+        } else if (strcmp(key, "stripe_mode") == 0) {
         if (strcmp(value, "channel_major") == 0 ||
             strcmp(value, "channel") == 0) {
             cfg->stripe_mode = PERF_STRIPE_CHANNEL_MAJOR;
@@ -584,6 +724,10 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         } else if (strcmp(value, "global_die") == 0 ||
                    strcmp(value, "die") == 0) {
             cfg->stripe_mode = PERF_STRIPE_GLOBAL_DIE;
+            end = (char *)(value + strlen(value));
+        } else if (strcmp(value, "page_across_chan") == 0 ||
+                   strcmp(value, "page_stripe") == 0) {
+            cfg->stripe_mode = PERF_STRIPE_PAGE_ACROSS_CHAN;
             end = (char *)(value + strlen(value));
         } else {
             return -1;
@@ -738,7 +882,8 @@ int perf_init(const perf_config_t *cfg) {
         return -1;
     }
     if (cfg->stripe_mode != PERF_STRIPE_CHANNEL_MAJOR &&
-        cfg->stripe_mode != PERF_STRIPE_GLOBAL_DIE) {
+        cfg->stripe_mode != PERF_STRIPE_GLOBAL_DIE &&
+        cfg->stripe_mode != PERF_STRIPE_PAGE_ACROSS_CHAN) {
         return -1;
     }
     if (cfg->workload != PERF_WORKLOAD_LEGACY &&
@@ -862,10 +1007,16 @@ int perf_init(const perf_config_t *cfg) {
         cfg->chan_num * g_state.d.die_per_chan, sizeof(die_ctx_t));
     g_state.rr_die = (int *)calloc(cfg->chan_num, sizeof(int));
     g_state.stripe_cursor = (int *)calloc(cfg->chan_num, sizeof(int));
+    g_state.cmd_stripe_base = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_pages_done = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_pages_launched = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_page_stripe = (int *)calloc(cfg->qd, sizeof(int));
     g_state.chan = (chan_t *)calloc(cfg->chan_num, sizeof(chan_t));
 
     if (!g_state.map || !g_state.cmd_op || !g_state.cmd_prio ||
         !g_state.die_ctx || !g_state.rr_die || !g_state.stripe_cursor ||
+        !g_state.cmd_stripe_base || !g_state.cmd_pages_done ||
+        !g_state.cmd_pages_launched || !g_state.cmd_page_stripe ||
         !g_state.chan) {
         perf_cleanup();
         return -1;
@@ -891,6 +1042,7 @@ int perf_init(const perf_config_t *cfg) {
                 ctx->slots[slot_idx].act = 0xFFF;
                 ctx->slots[slot_idx].time = 0;
                 ctx->slots[slot_idx].host_pages_left = 0;
+                ctx->slots[slot_idx].page_idx = -1;
             }
             ctx->suspended_slot = -1;
             ctx->suspended_act = 0xFFF;
@@ -928,6 +1080,7 @@ int perf_init(const perf_config_t *cfg) {
 
     g_state.next_die = 0;
     g_state.rr_chan = 0;
+    g_state.global_page_stripe = 0;
     g_state.initialized = 1;
     return 0;
 }
@@ -961,6 +1114,10 @@ void perf_cleanup(void) {
     free(g_state.die_ctx);
     free(g_state.rr_die);
     free(g_state.stripe_cursor);
+    free(g_state.cmd_stripe_base);
+    free(g_state.cmd_pages_done);
+    free(g_state.cmd_pages_launched);
+    free(g_state.cmd_page_stripe);
     free(g_state.chan);
 
     memset(&g_state, 0, sizeof(g_state));
@@ -987,7 +1144,18 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
             act = i;
             g_state.cmd_op[act] = op;
             g_state.cmd_prio[act] = prio;
-            select_target(&chan_id, &die_in_chan);
+            if (use_page_across_chan_stripe()) {
+                g_state.cmd_stripe_base[act] = g_state.global_page_stripe;
+                g_state.global_page_stripe += g_state.d.pages_per_block;
+                g_state.cmd_pages_done[act] = 0;
+                g_state.cmd_pages_launched[act] = 0;
+                g_state.cmd_page_stripe[act] = 1;
+                stripe_page_target(g_state.cmd_stripe_base[act], &chan_id,
+                                   &die_in_chan);
+            } else {
+                g_state.cmd_page_stripe[act] = 0;
+                select_target(&chan_id, &die_in_chan);
+            }
             enqueue_cmd(chan_id, die_in_chan, op, prio, act);
             g_state.map[i] = 1;
             (*inflight_cmds)++;
@@ -1046,6 +1214,10 @@ void perf_run(perf_stats_t *stats) {
                         progressed = 1;
                     }
 
+                    if (try_launch_pending_page_stripes(cur_time) > 0) {
+                        progressed = 1;
+                    }
+
                     // Channel idle arbitration: cmds first, read data can preempt
                     // write/erase cmds, then write data last.
                     // Priority: read cmd, read data, write/erase cmds, then write data.
@@ -1089,7 +1261,13 @@ void perf_run(perf_stats_t *stats) {
                         } else if (g_state.chan[i].op == OP_WRITE) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
-                            ps->host_pages_left = g_state.d.pages_per_block;
+                            int act = g_state.chan[i].act;
+
+                            if (!g_state.cmd_page_stripe[act]) {
+                                ps->host_pages_left = g_state.d.pages_per_block;
+                            } else {
+                                ps->host_pages_left = 0;
+                            }
                             ps->state = DIE_WRITE_DATA_READY;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
@@ -1116,10 +1294,12 @@ void perf_run(perf_stats_t *stats) {
                         if (g_state.chan[i].op == OP_READ) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+                            int act = g_state.chan[i].act;
 
                             read_bytes +=
                                 (uint64_t)g_state.d.read_bytes_per_page;
-                            if (g_state.chan[i].pages_left > 1) {
+                            if (!g_state.cmd_page_stripe[act] &&
+                                g_state.chan[i].pages_left > 1) {
                                 g_state.chan[i].pages_left--;
                                 g_state.chan[i].time =
                                     cur_time + g_state.d.data_time_read_page;
@@ -1127,10 +1307,32 @@ void perf_run(perf_stats_t *stats) {
                                 break;
                             }
 
-                            g_state.map[g_state.chan[i].act] = 0;
-                            inflight_cmds--;
-                            total_cmd++;
-                            read_cmd++;
+                            if (g_state.cmd_page_stripe[act]) {
+                                g_state.cmd_pages_done[act]++;
+                                ps->act = 0xFFF;
+                                ps->state = DIE_IDLE;
+                                ps->page_idx = -1;
+                                if (g_state.cmd_pages_done[act] <
+                                    g_state.d.pages_per_block) {
+                                    g_state.chan[i].act = 0xFFF;
+                                    g_state.chan[i].state = CHAN_IDLE;
+                                    g_state.chan[i].op = OP_READ;
+                                    g_state.chan[i].die = -1;
+                                    g_state.chan[i].slot = -1;
+                                    g_state.chan[i].pages_left = 0;
+                                    progressed = 1;
+                                    break;
+                                }
+                                complete_host_page_stripe(act, OP_READ,
+                                                          &inflight_cmds,
+                                                          &total_cmd,
+                                                          &read_cmd, NULL);
+                            } else {
+                                g_state.map[act] = 0;
+                                inflight_cmds--;
+                                total_cmd++;
+                                read_cmd++;
+                            }
                             if (ctx->suspended_op != OP_MAX) {
                                 plane_slot_t *sps =
                                     slot_at(ctx, ctx->suspended_slot);
@@ -1147,9 +1349,10 @@ void perf_run(perf_stats_t *stats) {
                                 ctx->suspended_op = OP_MAX;
                                 ctx->suspended_time = 0;
                                 ctx->suspended_slot = -1;
-                            } else {
+                            } else if (!g_state.cmd_page_stripe[act]) {
                                 ps->act = 0xFFF;
                                 ps->state = DIE_IDLE;
+                                ps->page_idx = -1;
                             }
                         } else if (g_state.chan[i].op == OP_WRITE) {
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);

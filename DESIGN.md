@@ -33,7 +33,10 @@
   自动使用 `channel_major` stripe。
 
 **Stripe**
-- `channel_major`：`rr_chan` 轮询 channel，每 channel 的 `stripe_cursor[ch]` 递增 die。
+- `channel_major`：`rr_chan` 轮询 channel，每 channel 的 `stripe_cursor[ch]` 递增 die（命令级 stripe）。
+- `page_across_chan` / `page_stripe`：**block 内按 page 跨 channel 条带**（fulldev 默认）。
+  - `page p` → `chan = (stripe_base+p) % chan_num`，`die = (stripe_base+p) / chan_num % die_per_chan`。
+  - 同一 host block 的各页在对应 channel 上 **并行** CMD/DATA（读）或 CMD/DATA/tprog（写）。
 - `global_die` + `io_pattern`：`random` 或 global die `sequential`。
 
 **块大小与 tR（cmd_size / block_size / page_size）**
