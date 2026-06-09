@@ -145,6 +145,8 @@ typedef struct perf_state {
     int *cmd_pages_done;
     int *cmd_pages_launched;
     int *cmd_page_stripe;
+    int *cmd_write_cmd_sent;
+    int *cmd_write_cmd_done;
     int global_page_stripe;
     int rr_chan;
     chan_t *chan;
@@ -313,8 +315,68 @@ static int try_launch_striped_page(int act, int op, int page_idx,
     return 1;
 }
 
+static int try_launch_striped_write_data_page(int act, int page_idx,
+                                              uint64_t cur_time) {
+    int base = g_state.cmd_stripe_base[act];
+    int ch;
+    int die;
+    int s;
+    int slot = -1;
+    die_ctx_t *ctx;
+    plane_slot_t *ps;
+
+    (void)cur_time;
+    stripe_page_target(base + page_idx, &ch, &die);
+    ctx = die_ctx_at(ch, die);
+    for (s = 0; s < ctx->slot_count; s++) {
+        if (slot_at(ctx, s)->state == DIE_IDLE) {
+            slot = s;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return 0;
+    }
+
+    ps = slot_at(ctx, slot);
+    ps->act = act;
+    ps->page_idx = page_idx;
+    ps->host_pages_left = 0;
+    ps->state = DIE_WRITE_DATA_READY;
+    return 1;
+}
+
+static int try_launch_striped_write_data_pages(int act, uint64_t cur_time) {
+    int started = 0;
+
+    while (g_state.cmd_pages_launched[act] < g_state.d.pages_per_block) {
+        int p = g_state.cmd_pages_launched[act];
+
+        if (!try_launch_striped_write_data_page(act, p, cur_time)) {
+            break;
+        }
+        g_state.cmd_pages_launched[act]++;
+        started = 1;
+    }
+    return started;
+}
+
 static int try_launch_striped_pages(int act, int op, uint64_t cur_time) {
     int started = 0;
+
+    if (op == OP_WRITE && g_state.cmd_page_stripe[act]) {
+        if (!g_state.cmd_write_cmd_sent[act]) {
+            if (try_launch_striped_page(act, op, 0, cur_time)) {
+                g_state.cmd_write_cmd_sent[act] = 1;
+                return 1;
+            }
+            return 0;
+        }
+        if (g_state.cmd_write_cmd_done[act]) {
+            return try_launch_striped_write_data_pages(act, cur_time);
+        }
+        return 0;
+    }
 
     while (g_state.cmd_pages_launched[act] < g_state.d.pages_per_block) {
         int p = g_state.cmd_pages_launched[act];
@@ -336,7 +398,15 @@ static int try_launch_pending_page_stripes(uint64_t cur_time) {
         if (!g_state.map[act] || !g_state.cmd_page_stripe[act]) {
             continue;
         }
-        if (g_state.cmd_pages_launched[act] >= g_state.d.pages_per_block) {
+        if (g_state.cmd_op[act] == OP_WRITE) {
+            if (g_state.cmd_write_cmd_sent[act] &&
+                (!g_state.cmd_write_cmd_done[act] ||
+                 g_state.cmd_pages_launched[act] >=
+                     g_state.d.pages_per_block)) {
+                continue;
+            }
+        } else if (g_state.cmd_pages_launched[act] >=
+                   g_state.d.pages_per_block) {
             continue;
         }
         if (try_launch_striped_pages(act, g_state.cmd_op[act], cur_time)) {
@@ -1011,12 +1081,15 @@ int perf_init(const perf_config_t *cfg) {
     g_state.cmd_pages_done = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_pages_launched = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_page_stripe = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_write_cmd_sent = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_write_cmd_done = (int *)calloc(cfg->qd, sizeof(int));
     g_state.chan = (chan_t *)calloc(cfg->chan_num, sizeof(chan_t));
 
     if (!g_state.map || !g_state.cmd_op || !g_state.cmd_prio ||
         !g_state.die_ctx || !g_state.rr_die || !g_state.stripe_cursor ||
         !g_state.cmd_stripe_base || !g_state.cmd_pages_done ||
         !g_state.cmd_pages_launched || !g_state.cmd_page_stripe ||
+        !g_state.cmd_write_cmd_sent || !g_state.cmd_write_cmd_done ||
         !g_state.chan) {
         perf_cleanup();
         return -1;
@@ -1118,6 +1191,8 @@ void perf_cleanup(void) {
     free(g_state.cmd_pages_done);
     free(g_state.cmd_pages_launched);
     free(g_state.cmd_page_stripe);
+    free(g_state.cmd_write_cmd_sent);
+    free(g_state.cmd_write_cmd_done);
     free(g_state.chan);
 
     memset(&g_state, 0, sizeof(g_state));
@@ -1149,6 +1224,8 @@ int perf_gen_cmd(int tmp_cmd_cnt, int *inflight_cmds) {
                 g_state.global_page_stripe += g_state.d.pages_per_block;
                 g_state.cmd_pages_done[act] = 0;
                 g_state.cmd_pages_launched[act] = 0;
+                g_state.cmd_write_cmd_sent[act] = 0;
+                g_state.cmd_write_cmd_done[act] = 0;
                 g_state.cmd_page_stripe[act] = 1;
                 stripe_page_target(g_state.cmd_stripe_base[act], &chan_id,
                                    &die_in_chan);
@@ -1263,12 +1340,16 @@ void perf_run(perf_stats_t *stats) {
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
                             int act = g_state.chan[i].act;
 
-                            if (!g_state.cmd_page_stripe[act]) {
-                                ps->host_pages_left = g_state.d.pages_per_block;
-                            } else {
+                            if (g_state.cmd_page_stripe[act]) {
+                                g_state.cmd_write_cmd_done[act] = 1;
+                                ps->act = 0xFFF;
+                                ps->state = DIE_IDLE;
+                                ps->page_idx = -1;
                                 ps->host_pages_left = 0;
+                            } else {
+                                ps->host_pages_left = g_state.d.pages_per_block;
+                                ps->state = DIE_WRITE_DATA_READY;
                             }
-                            ps->state = DIE_WRITE_DATA_READY;
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
                             g_state.chan[i].op = OP_READ;
