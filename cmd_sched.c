@@ -359,18 +359,45 @@ static int try_launch_striped_write_data_page(int act, int page_idx,
     return 1;
 }
 
+static int striped_write_page_active(int act, int page_idx) {
+    int base = g_state.cmd_stripe_base[act];
+    int ch;
+    int die;
+    int s;
+    die_ctx_t *ctx;
+
+    stripe_page_target(base, page_idx, &ch, &die);
+    ctx = die_ctx_at(ch, die);
+    for (s = 0; s < ctx->slot_count; s++) {
+        plane_slot_t *ps = slot_at(ctx, s);
+
+        if (ps->act == act && ps->page_idx == page_idx &&
+            (ps->state == DIE_WRITE_DATA_READY ||
+             ps->state == DIE_WRITE_DATA ||
+             ps->state == DIE_WRITE_WAIT)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int try_launch_striped_write_data_pages(int act, uint64_t cur_time) {
     int started = 0;
+    int launched = 0;
+    int p;
 
-    while (g_state.cmd_pages_launched[act] < g_state.d.pages_per_block) {
-        int p = g_state.cmd_pages_launched[act];
-
-        if (!try_launch_striped_write_data_page(act, p, cur_time)) {
-            break;
+    for (p = 0; p < g_state.d.pages_per_block; p++) {
+        if (striped_write_page_active(act, p)) {
+            launched++;
+            continue;
         }
-        g_state.cmd_pages_launched[act]++;
+        if (!try_launch_striped_write_data_page(act, p, cur_time)) {
+            continue;
+        }
+        launched++;
         started = 1;
     }
+    g_state.cmd_pages_launched[act] = launched;
     return started;
 }
 
@@ -1313,15 +1340,21 @@ void perf_run(perf_stats_t *stats) {
                         progressed = 1;
                     }
 
-                    // Channel idle arbitration: cmds first, read data can preempt
-                    // write/erase cmds, then write data last.
-                    // Priority: read cmd, read data, write/erase cmds, then write data.
+                    // Priority: read cmd, read data, write data, write/erase cmd.
                     if (try_schedule_cmd(i, cur_time, OP_READ)) {
                         progressed = 1;
                         break;
                     }
 
                     if (try_schedule_read_data(i, cur_time)) {
+                        progressed = 1;
+                        break;
+                    }
+
+                    /* Write DATA before write CMD so page-stripe slots do not
+                     * sit in WRITE_DATA_READY while new block CMDs consume the
+                     * channel (tprog-limited writes need slots in program). */
+                    if (try_schedule_write_data(i, cur_time)) {
                         progressed = 1;
                         break;
                     }
@@ -1334,10 +1367,6 @@ void perf_run(perf_stats_t *stats) {
                     if (try_schedule_cmd(i, cur_time, OP_ERASE)) {
                         progressed = 1;
                         break;
-                    }
-
-                    if (try_schedule_write_data(i, cur_time)) {
-                        progressed = 1;
                     }
                     break;
                 case CHAN_CMD:
@@ -1364,6 +1393,8 @@ void perf_run(perf_stats_t *stats) {
                                 ps->state = DIE_IDLE;
                                 ps->page_idx = -1;
                                 ps->host_pages_left = 0;
+                                (void)try_launch_striped_write_data_pages(
+                                    act, cur_time);
                             } else {
                                 ps->host_pages_left = g_state.d.pages_per_block;
                                 ps->state = DIE_WRITE_DATA_READY;
