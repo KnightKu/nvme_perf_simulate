@@ -1,0 +1,10 @@
+---
+description: Default git branch for nvme_perf_simulate work and commits
+alwaysApply: true
+---
+
+# Git branch: active-dev
+
+- Do all feature/fix work on the local **`active-dev`** branch unless the user specifies another branch.
+- When the user asks to commit changes, commit on **`active-dev`** (check out or confirm branch first if needed).
+- Do not push unless the user explicitly asks.
