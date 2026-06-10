@@ -74,6 +74,7 @@ typedef struct plane_slot_s {
     uint64_t time;
     int host_pages_left;
     int page_idx;
+    int cw_idx;
 } plane_slot_t;
 
 typedef struct die_ctx_s {
@@ -96,6 +97,8 @@ typedef struct chan_s {
     int slot;
     uint64_t time;
     int pages_left;
+    int cw_idx;
+    int cw_buf_slot;
 } chan_t;
 
 typedef struct perf_derived {
@@ -105,8 +108,15 @@ typedef struct perf_derived {
     uint64_t terase;
     uint64_t data_time_read_page;
     uint64_t data_time_write_page;
+    uint64_t data_time_read_cw;
+    uint64_t data_time_write_cw;
     int pages_per_block;
     int page_unit;
+    int codewords_per_page;
+    int codeword_read_parity;
+    int codeword_write_parity;
+    int codeword_wire_bytes;
+    int codeword_write_wire_bytes;
     int read_xfer_size;
     int write_xfer_size;
     int read_bytes_per_page;
@@ -155,8 +165,14 @@ typedef struct perf_state {
     int *cmd_page_stripe;
     int *cmd_write_cmd_sent;
     int *cmd_write_cmd_done;
+    int *cmd_cw_read_done;
+    int *cmd_cw_write_done;
     cmd_pool_t cmd_pool;
     bus_xfer_t bus;
+    uint64_t read_bus_busy_until;
+    uint64_t read_bus_bytes;
+    uint64_t chan_read_wire_bytes;
+    uint64_t chan_write_wire_bytes;
     int global_page_stripe;
     int rr_chan;
     chan_t *chan;
@@ -208,6 +224,9 @@ static inline int queue_pop(queue_t *q) {
 
 void enqueue_cmd(int chan_id, int die_in_chan, int op, int prio, int act);
 int use_page_block_stripe(void);
+void complete_host_page_stripe(int act, int op, int *inflight_cmds,
+                               uint64_t *total_cmd, uint64_t *read_cmd,
+                               uint64_t *write_cmd);
 void stripe_page_target(int stripe_base, int page_idx, int *chan_id,
                         int *die_in_chan);
 void select_target(int *chan_id, int *die_in_chan);

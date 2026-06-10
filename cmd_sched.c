@@ -1,8 +1,10 @@
 #include "cmd_sched.h"
+#include "host_port.h"
 
 #include "bus_xfer.h"
 #include "cmd_generate.h"
 #include "cmd_pool.h"
+#include "cw_path.h"
 #include "sched_internal.h"
 
 #include <ctype.h>
@@ -61,7 +63,7 @@ void stripe_page_target(int stripe_base, int page_idx, int *chan_id,
     }
 }
 
-static inline void complete_host_page_stripe(int act, int op,
+void complete_host_page_stripe(int act, int op,
                                              int *inflight_cmds,
                                              uint64_t *total_cmd,
                                              uint64_t *read_cmd,
@@ -106,6 +108,7 @@ static int try_launch_striped_page(int act, int op, int page_idx,
     ps->act = act;
     ps->page_idx = page_idx;
     ps->host_pages_left = 0;
+    ps->cw_idx = 0;
     ps->state = DIE_CMD;
 
     g_state.chan[ch].state = CHAN_CMD;
@@ -145,7 +148,11 @@ static int try_launch_striped_write_data_page(int act, int page_idx,
     ps->act = act;
     ps->page_idx = page_idx;
     ps->host_pages_left = 0;
+    ps->cw_idx = 0;
     ps->state = DIE_WRITE_DATA_READY;
+    if (use_codeword_buffers()) {
+        (void)cw_prepare_write_page(act, page_idx, NULL);
+    }
     return 1;
 }
 
@@ -315,7 +322,12 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                     !g_state.cmd_page_stripe[act] &&
                     ps->host_pages_left > 1) {
                     ps->host_pages_left--;
+                    ps->cw_idx = 0;
                     ps->state = DIE_WRITE_DATA_READY;
+                    if (use_codeword_buffers()) {
+                        (void)host_port_try_feed_write(
+                            chan_id, act, ps->page_idx, 0, NULL);
+                    }
                     completed++;
                     continue;
                 }
@@ -431,6 +443,7 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
 
             slot_at(ctx, slot)->act = act;
             slot_at(ctx, slot)->page_idx = -1;
+            slot_at(ctx, slot)->cw_idx = 0;
             slot_at(ctx, slot)->state = DIE_CMD;
 
             g_state.chan[chan_id].state = CHAN_CMD;
@@ -448,6 +461,9 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
 }
 
 static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
+    if (use_codeword_buffers()) {
+        return cw_try_schedule_read_data(chan_id, cur_time);
+    }
     int j;
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
@@ -480,6 +496,9 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
 }
 
 static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
+    if (use_codeword_buffers()) {
+        return cw_try_schedule_write_data(chan_id, cur_time);
+    }
     int j;
 
     for (j = 0; j < g_state.d.die_per_chan; j++) {
@@ -548,6 +567,12 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->bus_bandwidth = 0;
     cfg->bus_cmd_bytes = 64;
     cfg->bus_base_latency = 0;
+    cfg->use_codeword_buffers = 0;
+    cfg->codeword_host_bytes = 4096;
+    cfg->output_buffer_bytes = 65536;
+    cfg->host_read_chunk_bytes = 4096;
+    cfg->host_write_chunk_bytes = 4096;
+    cfg->read_bus_bandwidth = 0;
 }
 
 static int set_config_value(perf_config_t *cfg, const char *key,
@@ -665,6 +690,18 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->bus_cmd_bytes = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "bus_base_latency") == 0) {
         cfg->bus_base_latency = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "use_codeword_buffers") == 0) {
+        cfg->use_codeword_buffers = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "codeword_host_bytes") == 0) {
+        cfg->codeword_host_bytes = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "output_buffer_bytes") == 0) {
+        cfg->output_buffer_bytes = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "host_read_chunk_bytes") == 0) {
+        cfg->host_read_chunk_bytes = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "host_write_chunk_bytes") == 0) {
+        cfg->host_write_chunk_bytes = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "read_bus_bandwidth") == 0) {
+        cfg->read_bus_bandwidth = (int)strtol(value, &end, 10);
     } else {
         return 0;
     }
@@ -814,6 +851,16 @@ int perf_init(const perf_config_t *cfg) {
     if (cfg->block_size > 0 && cfg->block_size % cfg->page_size != 0) {
         return -1;
     }
+    if (cfg->use_codeword_buffers) {
+        if (cfg->codeword_host_bytes <= 0 ||
+            cfg->page_size % cfg->codeword_host_bytes != 0 ||
+            cfg->output_buffer_bytes <= 0 ||
+            cfg->host_read_chunk_bytes <= 0 ||
+            cfg->host_write_chunk_bytes <= 0 ||
+            cfg->output_buffer_bytes % cfg->host_read_chunk_bytes != 0) {
+            return -1;
+        }
+    }
 
     memset(&g_state, 0, sizeof(g_state));
     g_state.cfg = *cfg;
@@ -889,6 +936,30 @@ int perf_init(const perf_config_t *cfg) {
         g_state.d.data_time_write_page =
             write_wire_page * TIME_SCALE / (uint64_t)cfg->chan_speed;
         {
+            int cw_host = cfg->codeword_host_bytes > 0
+                              ? cfg->codeword_host_bytes
+                              : 4096;
+            int cws_pp = cfg->page_size / cw_host;
+
+            if (cws_pp <= 0) {
+                return -1;
+            }
+            g_state.d.codewords_per_page = cws_pp;
+            g_state.d.codeword_read_parity = cfg->ecc_parity_size / cws_pp;
+            g_state.d.codeword_write_parity =
+                cfg->page_parity_size / cws_pp;
+            g_state.d.codeword_wire_bytes =
+                cw_host + g_state.d.codeword_read_parity;
+            g_state.d.codeword_write_wire_bytes =
+                cw_host + g_state.d.codeword_write_parity;
+            g_state.d.data_time_read_cw =
+                (uint64_t)g_state.d.codeword_wire_bytes * TIME_SCALE /
+                (uint64_t)cfg->chan_speed;
+            g_state.d.data_time_write_cw =
+                (uint64_t)g_state.d.codeword_write_wire_bytes * TIME_SCALE /
+                (uint64_t)cfg->chan_speed;
+        }
+        {
             int xor_ratio =
                 (cfg->die_num > 64) ? 64 : cfg->die_num;
             g_state.d.xor_factor =
@@ -939,6 +1010,8 @@ int perf_init(const perf_config_t *cfg) {
     g_state.cmd_page_stripe = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_write_cmd_sent = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_write_cmd_done = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_cw_read_done = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_cw_write_done = (int *)calloc(cfg->qd, sizeof(int));
     g_state.chan = (chan_t *)calloc(cfg->chan_num, sizeof(chan_t));
 
     if (!g_state.map || !g_state.cmd_op || !g_state.cmd_prio ||
@@ -947,6 +1020,7 @@ int perf_init(const perf_config_t *cfg) {
         !g_state.cmd_stripe_base || !g_state.cmd_pages_done ||
         !g_state.cmd_pages_launched || !g_state.cmd_page_stripe ||
         !g_state.cmd_write_cmd_sent || !g_state.cmd_write_cmd_done ||
+        !g_state.cmd_cw_read_done || !g_state.cmd_cw_write_done ||
         !g_state.chan) {
         perf_cleanup();
         return -1;
@@ -960,6 +1034,11 @@ int perf_init(const perf_config_t *cfg) {
     }
 
     bus_xfer_init();
+
+    if (cw_path_init() != 0) {
+        perf_cleanup();
+        return -1;
+    }
 
     srand((unsigned)time(NULL));
 
@@ -982,6 +1061,7 @@ int perf_init(const perf_config_t *cfg) {
                 ctx->slots[slot_idx].time = 0;
                 ctx->slots[slot_idx].host_pages_left = 0;
                 ctx->slots[slot_idx].page_idx = -1;
+                ctx->slots[slot_idx].cw_idx = 0;
             }
             ctx->suspended_slot = -1;
             ctx->suspended_act = 0xFFF;
@@ -1008,6 +1088,8 @@ int perf_init(const perf_config_t *cfg) {
         g_state.chan[i].die = -1;
         g_state.chan[i].slot = -1;
         g_state.chan[i].pages_left = 0;
+        g_state.chan[i].cw_idx = 0;
+        g_state.chan[i].cw_buf_slot = -1;
         g_state.rr_die[i] = 0;
     }
 
@@ -1054,6 +1136,9 @@ void perf_cleanup(void) {
     free(g_state.cmd_target_die);
     cmd_pool_cleanup();
     bus_xfer_cleanup();
+    cw_path_cleanup();
+    free(g_state.cmd_cw_read_done);
+    free(g_state.cmd_cw_write_done);
     free(g_state.die_ctx);
     free(g_state.rr_die);
     free(g_state.stripe_cursor);
@@ -1089,6 +1174,11 @@ void perf_run(perf_stats_t *stats) {
     int inflight_cmds = 0;
     uint64_t start_time = 0;
     uint64_t end_time = 0;
+    cw_run_ctx_t cw_ctx = {
+        .inflight_cmds = &inflight_cmds,
+        .total_cmd = &total_cmd,
+        .read_cmd = &read_cmd,
+    };
 
     if (!g_state.initialized) {
         return;
@@ -1115,6 +1205,11 @@ void perf_run(perf_stats_t *stats) {
             uint64_t next_event = UINT64_MAX;
 
         if (bus_process(sim_time, &bus_xfers, &bus_bytes) > 0) {
+            progressed = 1;
+        }
+
+        if (use_codeword_buffers() &&
+            cw_post_step(sim_time, &read_bytes, &write_bytes, &cw_ctx) > 0) {
             progressed = 1;
         }
 
@@ -1188,7 +1283,12 @@ void perf_run(perf_stats_t *stats) {
                                     act, cur_time);
                             } else {
                                 ps->host_pages_left = g_state.d.pages_per_block;
+                                ps->cw_idx = 0;
                                 ps->state = DIE_WRITE_DATA_READY;
+                                if (use_codeword_buffers()) {
+                                    (void)host_port_try_feed_write(
+                                        i, act, ps->page_idx, 0, NULL);
+                                }
                             }
                             g_state.chan[i].state = CHAN_IDLE;
                             g_state.chan[i].act = 0xFFF;
@@ -1213,6 +1313,13 @@ void perf_run(perf_stats_t *stats) {
                     cur_time = sim_time;
                     if (cur_time >= g_state.chan[i].time) {
                         if (g_state.chan[i].op == OP_READ) {
+                            if (use_codeword_buffers()) {
+                                cw_chan_data_read_complete(
+                                    i, cur_time, &inflight_cmds, &total_cmd,
+                                    &read_cmd);
+                                progressed = 1;
+                                break;
+                            }
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
                             int act = g_state.chan[i].act;
@@ -1276,6 +1383,12 @@ void perf_run(perf_stats_t *stats) {
                                 ps->page_idx = -1;
                             }
                         } else if (g_state.chan[i].op == OP_WRITE) {
+                            if (use_codeword_buffers()) {
+                                cw_chan_data_write_complete(i, cur_time,
+                                                            &write_bytes);
+                                progressed = 1;
+                                break;
+                            }
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
 
@@ -1301,9 +1414,15 @@ void perf_run(perf_stats_t *stats) {
             if (!progressed) {
                 int ch;
                 uint64_t bus_next = bus_xfer_next_event(sim_time);
+                uint64_t cw_next = use_codeword_buffers()
+                                       ? cw_next_event(sim_time)
+                                       : UINT64_MAX;
 
                 if (bus_next < next_event) {
                     next_event = bus_next;
+                }
+                if (cw_next < next_event) {
+                    next_event = cw_next;
                 }
                 for (ch = 0; ch < g_state.cfg.chan_num; ch++) {
                     if (g_state.chan[ch].state != CHAN_IDLE &&
@@ -1349,6 +1468,9 @@ void perf_run(perf_stats_t *stats) {
         stats->pool_rejects = pool_rejects;
         stats->bus_xfers = bus_xfers;
         stats->bus_bytes = bus_bytes;
+        stats->read_bus_bytes = g_state.read_bus_bytes;
+        stats->chan_read_wire_bytes = g_state.chan_read_wire_bytes;
+        stats->chan_write_wire_bytes = g_state.chan_write_wire_bytes;
     }
 }
 

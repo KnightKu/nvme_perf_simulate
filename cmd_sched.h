@@ -52,6 +52,12 @@ typedef struct perf_config {
     int bus_bandwidth;    /* MB/s; 0 = unlimited */
     int bus_cmd_bytes;    /* bytes per host cmd on bus (default 64) */
     int bus_base_latency; /* fixed bus latency per cmd (us) */
+    int use_codeword_buffers; /* 0=legacy page DATA; 1=codeword ping-pong path */
+    int codeword_host_bytes;
+    int output_buffer_bytes;
+    int host_read_chunk_bytes;
+    int host_write_chunk_bytes;
+    int read_bus_bandwidth; /* MB/s; 0 = unlimited */
 } perf_config_t;
 
 typedef struct perf_stats {
@@ -66,6 +72,9 @@ typedef struct perf_stats {
     uint64_t pool_rejects;
     uint64_t bus_xfers;
     uint64_t bus_bytes;
+    uint64_t read_bus_bytes;
+    uint64_t chan_read_wire_bytes;
+    uint64_t chan_write_wire_bytes;
 } perf_stats_t;
 
 typedef struct perf_iops {
