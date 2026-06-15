@@ -5,7 +5,7 @@ SRCS := main.c cmd_sched.c cmd_generate.c cmd_pool.c bus_xfer.c \
 CC ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 
-.PHONY: all clean
+.PHONY: all clean test-legacy
 
 all: $(TARGET)
 
@@ -14,3 +14,6 @@ $(TARGET): $(SRCS)
 
 clean:
 	$(RM) $(TARGET)
+
+test-legacy: $(TARGET)
+	bash scripts/run_legacy_io_tests.sh
