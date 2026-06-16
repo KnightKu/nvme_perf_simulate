@@ -3,6 +3,9 @@
 # Usage:
 #   .\scripts\run_legacy_io_tests.ps1
 #   $env:ELEMENT=8192; $env:QD=512; .\scripts\run_legacy_io_tests.ps1
+#
+# Outputs per-case logs and summary under tests/out/:
+#   summary.csv, summary.txt, summary.json
 
 $ErrorActionPreference = "Stop"
 
@@ -16,6 +19,7 @@ $Baseline = if ($env:BASELINE) { $env:BASELINE } else { Join-Path $Root "tests\b
 $OutDir = if ($env:OUT_DIR) { $env:OUT_DIR } else { Join-Path $Root "tests\out" }
 $Element = if ($env:ELEMENT) { $env:ELEMENT } else { "16384" }
 $Qd = if ($env:QD) { $env:QD } else { "1024" }
+$Summarize = if ($env:SUMMARIZE) { $env:SUMMARIZE } else { Join-Path $Root "scripts\summarize_legacy_io.py" }
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
@@ -74,6 +78,117 @@ function Run-Case {
     return $true
 }
 
+function Parse-PerfLog {
+    param([string]$LogPath)
+    $result = [ordered]@{
+        status = "MISSING"
+        total_iops = $null
+        read_iops = $null
+        write_iops = $null
+        read_bw_mbps = $null
+        write_bw_mbps = $null
+        total_bw_mbps = $null
+    }
+    if (-not (Test-Path $LogPath)) { return $result }
+    $text = Get-Content $LogPath -Raw
+    if ($text -match "Failed to load config" -or $text -match "Failed to init perf model") {
+        $result.status = "FAIL"
+        return $result
+    }
+    $patterns = @{
+        total_iops = "Performance = ([\d.]+) IOPS"
+        read_iops = "Read IOPS = ([\d.]+)"
+        write_iops = "Write IOPS = ([\d.]+)"
+        read_bw_mbps = "Read Bandwidth \(sim\) = ([\d.]+) MB/s"
+        write_bw_mbps = "Write Bandwidth \(sim\) = ([\d.]+) MB/s"
+        total_bw_mbps = "Total Bandwidth \(sim\) = ([\d.]+) MB/s"
+    }
+    foreach ($key in $patterns.Keys) {
+        if ($text -match $patterns[$key]) {
+            $result[$key] = [double]$Matches[1]
+        }
+    }
+    if ($null -ne $result.total_iops) { $result.status = "PASS" } else { $result.status = "FAIL" }
+    return $result
+}
+
+function Summarize-ResultsNative {
+    $caseOrder = @(
+        "rand_read_4k", "rand_write_4k", "mixed_rw_70_30", "mixed_rw_50_50",
+        "rand_read_128k", "rand_write_128k", "mixed_rw_70_30_128k"
+    )
+    $caseMeta = @{
+        rand_read_4k = @{ category = "random_read"; block = "4K"; read = 100; write = 0 }
+        rand_write_4k = @{ category = "random_write"; block = "4K"; read = 0; write = 100 }
+        mixed_rw_70_30 = @{ category = "mixed"; block = "4K"; read = 70; write = 30 }
+        mixed_rw_50_50 = @{ category = "mixed"; block = "4K"; read = 50; write = 50 }
+        rand_read_128k = @{ category = "random_read"; block = "128K"; read = 100; write = 0 }
+        rand_write_128k = @{ category = "random_write"; block = "128K"; read = 0; write = 100 }
+        mixed_rw_70_30_128k = @{ category = "mixed"; block = "128K"; read = 70; write = 30 }
+    }
+    $rows = @()
+    foreach ($name in $caseOrder) {
+        $meta = $caseMeta[$name]
+        $parsed = Parse-PerfLog (Join-Path $OutDir "$name.log")
+        $rows += [pscustomobject]@{
+            case = $name
+            category = $meta.category
+            block = $meta.block
+            read_ratio = $meta.read
+            write_ratio = $meta.write
+            status = $parsed.status
+            total_iops = $parsed.total_iops
+            read_iops = $parsed.read_iops
+            write_iops = $parsed.write_iops
+            read_bw_mbps = $parsed.read_bw_mbps
+            write_bw_mbps = $parsed.write_bw_mbps
+            total_bw_mbps = $parsed.total_bw_mbps
+        }
+    }
+    $csvPath = Join-Path $OutDir "summary.csv"
+    $txtPath = Join-Path $OutDir "summary.txt"
+    $rows | Export-Csv -NoTypeInformation -Encoding ascii $csvPath
+    $rows | Format-Table case, category, block, read_ratio, write_ratio,
+        @{N="read_iops";E={if($_.read_iops -ne $null){"{0:N2}" -f $_.read_iops}else{"-"}}},
+        @{N="write_iops";E={if($_.write_iops -ne $null){"{0:N2}" -f $_.write_iops}else{"-"}}},
+        @{N="read_mb_s";E={if($_.read_bw_mbps -ne $null){"{0:N2}" -f $_.read_bw_mbps}else{"-"}}},
+        @{N="write_mb_s";E={if($_.write_bw_mbps -ne $null){"{0:N2}" -f $_.write_bw_mbps}else{"-"}}},
+        @{N="total_mb_s";E={if($_.total_bw_mbps -ne $null){"{0:N2}" -f $_.total_bw_mbps}else{"-"}}},
+        status -AutoSize | Out-String | Set-Content -Encoding ascii $txtPath
+    Write-Host ""
+    Write-Host "======== Legacy IO Benchmark Summary ========"
+    $rows | Format-Table case, category, block, read_ratio, write_ratio,
+        @{N="read_iops";E={if($_.read_iops -ne $null){"{0:N2}" -f $_.read_iops}else{"-"}}},
+        @{N="write_iops";E={if($_.write_iops -ne $null){"{0:N2}" -f $_.write_iops}else{"-"}}},
+        @{N="read_mb_s";E={if($_.read_bw_mbps -ne $null){"{0:N2}" -f $_.read_bw_mbps}else{"-"}}},
+        @{N="write_mb_s";E={if($_.write_bw_mbps -ne $null){"{0:N2}" -f $_.write_bw_mbps}else{"-"}}},
+        @{N="total_mb_s";E={if($_.total_bw_mbps -ne $null){"{0:N2}" -f $_.total_bw_mbps}else{"-"}}},
+        status -AutoSize
+    Write-Host "Wrote $csvPath"
+    Write-Host "Wrote $txtPath"
+    $bad = @($rows | Where-Object { $_.status -ne "PASS" })
+    return ($bad.Count -eq 0)
+}
+
+function Summarize-Results {
+    if (-not (Test-Path $Summarize)) {
+        Write-Warning "Summarize script not found: $Summarize; using built-in parser"
+        return Summarize-ResultsNative
+    }
+    $python = $null
+    if (Get-Command python -ErrorAction SilentlyContinue) {
+        $python = "python"
+    } elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
+        $python = "python3"
+    }
+    if (-not $python) {
+        Write-Warning "Python not found; using built-in parser"
+        return Summarize-ResultsNative
+    }
+    & $python $Summarize $OutDir
+    return ($LASTEXITCODE -eq 0)
+}
+
 $Fail = 0
 
 if (-not (Run-Case "rand_read_4k" @{
@@ -108,9 +223,17 @@ if (-not (Run-Case "mixed_rw_70_30_128k" @{
     })) { $Fail = 1 }
 
 Write-Host "========================================"
+if ($Fail -ne 0) {
+    Write-Host "Some simulator runs failed. Generating partial summary..." -ForegroundColor Yellow
+}
+
+if (-not (Summarize-Results)) {
+    $Fail = 1
+}
+
 if ($Fail -eq 0) {
     Write-Host "All legacy IO tests passed."
-    Write-Host "Logs: $OutDir\*.log"
+    Write-Host "Summary: $OutDir\summary.csv"
     exit 0
 }
 Write-Host "Some tests failed. See logs in $OutDir" -ForegroundColor Red

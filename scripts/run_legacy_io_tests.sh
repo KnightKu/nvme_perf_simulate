@@ -5,6 +5,11 @@
 #   ./scripts/run_legacy_io_tests.sh
 #   ELEMENT=8192 QD=512 ./scripts/run_legacy_io_tests.sh
 #
+# Outputs per-case logs under tests/out/ and a final summary:
+#   tests/out/summary.csv
+#   tests/out/summary.txt
+#   tests/out/summary.json
+#
 # Requires: nvme_perf_model (build with `make` first).
 
 set -euo pipefail
@@ -15,6 +20,7 @@ BASELINE="${BASELINE:-$ROOT/tests/baseline.conf}"
 OUT_DIR="${OUT_DIR:-$ROOT/tests/out}"
 ELEMENT="${ELEMENT:-16384}"
 QD="${QD:-1024}"
+SUMMARIZE="${SUMMARIZE:-$ROOT/scripts/summarize_legacy_io.py}"
 
 mkdir -p "$OUT_DIR"
 
@@ -68,6 +74,78 @@ run_case() {
     echo
 }
 
+summarize_results_native() {
+    local csv="$OUT_DIR/summary.csv"
+    echo "case,category,block,read_ratio,write_ratio,status,read_iops,write_iops,read_bw_mbps,write_bw_mbps,total_bw_mbps" > "$csv"
+    local names=(
+        rand_read_4k:random_read:4K:100:0
+        rand_write_4k:random_write:4K:0:100
+        mixed_rw_70_30:mixed:4K:70:30
+        mixed_rw_50_50:mixed:4K:50:50
+        rand_read_128k:random_read:128K:100:0
+        rand_write_128k:random_write:128K:0:100
+        mixed_rw_70_30_128k:mixed:128K:70:30
+    )
+    local entry name category block rr wr log status
+    local read_iops write_iops read_bw write_bw total_bw
+    echo ""
+    echo "======== Legacy IO Benchmark Summary ========"
+    printf "%-22s %-13s %-6s %-9s %11s %11s %10s %10s %10s %-6s\n" \
+        "Case" "Type" "Block" "R/W" "Read IOPS" "Write IOPS" "Read MB/s" "Write MB/s" "Total MB/s" "Status"
+    printf "%.0s-" {1..110}; echo
+    for entry in "${names[@]}"; do
+        IFS=: read -r name category block rr wr <<< "$entry"
+        log="$OUT_DIR/${name}.log"
+        status="MISSING"
+        read_iops="-"; write_iops="-"; read_bw="-"; write_bw="-"; total_bw="-"
+        if [[ -f "$log" ]]; then
+            read_iops="$(sed -n 's/Read IOPS = \([0-9.]*\).*/\1/p' "$log" | head -n1)"
+            write_iops="$(sed -n 's/Write IOPS = \([0-9.]*\).*/\1/p' "$log" | head -n1)"
+            read_bw="$(sed -n 's/Read Bandwidth (sim) = \([0-9.]*\) MB\/s.*/\1/p' "$log" | head -n1)"
+            write_bw="$(sed -n 's/Write Bandwidth (sim) = \([0-9.]*\) MB\/s.*/\1/p' "$log" | head -n1)"
+            total_bw="$(sed -n 's/Total Bandwidth (sim) = \([0-9.]*\) MB\/s.*/\1/p' "$log" | head -n1)"
+            [[ -z "$read_iops" ]] && read_iops="-"
+            [[ -z "$write_iops" ]] && write_iops="-"
+            [[ -z "$read_bw" ]] && read_bw="-"
+            [[ -z "$write_bw" ]] && write_bw="-"
+            [[ -z "$total_bw" ]] && total_bw="-"
+            if grep -q "Performance = " "$log"; then status="PASS"; else status="FAIL"; fi
+        fi
+        printf "%-22s %-13s %-6s %-9s %11s %11s %10s %10s %10s %-6s\n" \
+            "$name" "$category" "$block" "${rr}/${wr}" "$read_iops" "$write_iops" "$read_bw" "$write_bw" "$total_bw" "$status"
+        echo "${name},${category},${block},${rr},${wr},${status},${read_iops},${write_iops},${read_bw},${write_bw},${total_bw}" >> "$csv"
+    done
+    echo ""
+    echo "Wrote $csv"
+}
+
+summarize_results() {
+    if [[ -f "$SUMMARIZE" ]]; then
+        if command -v python3 >/dev/null 2>&1; then
+            python3 "$SUMMARIZE" "$OUT_DIR"
+            return $?
+        fi
+        if command -v python >/dev/null 2>&1; then
+            python "$SUMMARIZE" "$OUT_DIR"
+            return $?
+        fi
+    fi
+    echo "warning: python not found; using built-in summary" >&2
+    summarize_results_native
+    local entry name log
+    local names=(
+        rand_read_4k rand_write_4k mixed_rw_70_30 mixed_rw_50_50
+        rand_read_128k rand_write_128k mixed_rw_70_30_128k
+    )
+    for name in "${names[@]}"; do
+        log="$OUT_DIR/${name}.log"
+        if [[ ! -f "$log" ]] || ! grep -q "Performance = " "$log"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
 FAIL=0
 
 run_case rand_read_4k \
@@ -102,9 +180,17 @@ run_case mixed_rw_70_30_128k \
     || FAIL=1
 
 echo "========================================"
+if [[ "$FAIL" -ne 0 ]]; then
+    echo "Some simulator runs failed. Generating partial summary..." >&2
+fi
+
+if ! summarize_results; then
+    FAIL=1
+fi
+
 if [[ "$FAIL" -eq 0 ]]; then
     echo "All legacy IO tests passed."
-    echo "Logs: $OUT_DIR/*.log"
+    echo "Summary: $OUT_DIR/summary.csv"
     exit 0
 fi
 echo "Some tests failed. See logs in $OUT_DIR" >&2

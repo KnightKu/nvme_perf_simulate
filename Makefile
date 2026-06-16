@@ -5,7 +5,7 @@ SRCS := main.c cmd_sched.c cmd_generate.c cmd_pool.c bus_xfer.c \
 CC ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 
-.PHONY: all clean test-legacy
+.PHONY: all clean test-legacy summarize-legacy
 
 all: $(TARGET)
 
@@ -17,3 +17,6 @@ clean:
 
 test-legacy: $(TARGET)
 	bash scripts/run_legacy_io_tests.sh
+
+summarize-legacy:
+	python3 scripts/summarize_legacy_io.py tests/out
