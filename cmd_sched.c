@@ -418,6 +418,15 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
     return completed;
 }
 
+static inline void chan_go_idle(int chan_id) {
+    g_state.chan[chan_id].act = 0xFFF;
+    g_state.chan[chan_id].state = CHAN_IDLE;
+    g_state.chan[chan_id].op = OP_READ;
+    g_state.chan[chan_id].die = -1;
+    g_state.chan[chan_id].slot = -1;
+    g_state.chan[chan_id].pages_left = 0;
+}
+
 static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
     int prio;
     int j;
@@ -1289,7 +1298,8 @@ void perf_run(perf_stats_t *stats) {
     }
 
     while (1) {
-        if (total_cmd > g_state.cfg.element) {
+        if (total_cmd > g_state.cfg.element && inflight_cmds == 0 &&
+            !write_cache_has_pending()) {
             break;
         }
         if (g_state.cfg.qd >= 512) {
@@ -1318,14 +1328,17 @@ void perf_run(perf_stats_t *stats) {
         }
 
         for (i = 0; i < g_state.cfg.chan_num; i++) {
+            if (complete_wait_ops(i, sim_time, &inflight_cmds, &total_cmd,
+                                  &write_cmd, &erase_cmd,
+                                  &nand_program_pages) > 0) {
+                progressed = 1;
+            }
+        }
+
+        for (i = 0; i < g_state.cfg.chan_num; i++) {
             switch (g_state.chan[i].state) {
                 case CHAN_IDLE:
                     cur_time = sim_time;
-                    if (complete_wait_ops(i, cur_time, &inflight_cmds, &total_cmd,
-                                          &write_cmd, &erase_cmd,
-                                          &nand_program_pages) > 0) {
-                        progressed = 1;
-                    }
 
                     if (try_launch_pending_page_stripes(cur_time) > 0) {
                         progressed = 1;
@@ -1503,6 +1516,7 @@ void perf_run(perf_stats_t *stats) {
                             }
                             if (g_state.chan[i].act == 0xFFF &&
                                 write_cache_chan_data_complete(i, cur_time)) {
+                                chan_go_idle(i);
                                 progressed = 1;
                                 break;
                             }
@@ -1540,12 +1554,7 @@ void perf_run(perf_stats_t *stats) {
                                 ps->time = cur_time + g_state.d.tprog;
                             }
                         }
-                        g_state.chan[i].act = 0xFFF;
-                        g_state.chan[i].state = CHAN_IDLE;
-                        g_state.chan[i].op = OP_READ;
-                        g_state.chan[i].die = -1;
-                        g_state.chan[i].slot = -1;
-                        g_state.chan[i].pages_left = 0;
+                        chan_go_idle(i);
                         progressed = 1;
                     }
                     break;

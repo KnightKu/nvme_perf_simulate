@@ -91,11 +91,36 @@ int write_cache_try_schedule_flush(int chan_id, uint64_t cur_time) {
     return 0;
 }
 
+int write_cache_has_pending(void) {
+    int chan_id;
+    int die;
+
+    if (!g_state.cfg.write_cache || g_state.cfg.block_size != 0) {
+        return 0;
+    }
+
+    for (chan_id = 0; chan_id < g_state.cfg.chan_num; chan_id++) {
+        for (die = 0; die < g_state.d.die_per_chan; die++) {
+            int slot;
+            die_ctx_t *ctx = die_ctx_at(chan_id, die);
+
+            for (slot = 0; slot < ctx->slot_count; slot++) {
+                plane_slot_t *ps = slot_at(ctx, slot);
+
+                if (ps->cache_flush) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 int write_cache_chan_data_complete(int chan_id, uint64_t cur_time) {
     die_ctx_t *ctx = die_ctx_at(chan_id, g_state.chan[chan_id].die);
     plane_slot_t *ps = slot_at(ctx, g_state.chan[chan_id].slot);
 
-    if (!ps->cache_flush) {
+    if (!ps->cache_flush || ps->state != DIE_WRITE_DATA) {
         return 0;
     }
 

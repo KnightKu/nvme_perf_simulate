@@ -18,5 +18,6 @@ int write_cache_try_schedule_flush(int chan_id, uint64_t cur_time);
 int write_cache_chan_data_complete(int chan_id, uint64_t cur_time);
 int write_cache_tprog_complete(int chan_id, int die, int slot, uint64_t cur_time,
                                uint64_t *nand_program_pages);
+int write_cache_has_pending(void);
 
 #endif
