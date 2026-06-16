@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run legacy random / mixed read-write benchmark cases.
+# Run legacy / sequential / mixed IO benchmark cases.
 #
 # Usage:
 #   ./scripts/run_legacy_io_tests.sh
@@ -78,10 +78,14 @@ summarize_results_native() {
     local csv="$OUT_DIR/summary.csv"
     echo "case,category,block,read_ratio,write_ratio,status,read_iops,write_iops,read_bw_mbps,write_bw_mbps,total_bw_mbps" > "$csv"
     local names=(
+        seq_read_4k:sequential_read:4K:100:0
+        seq_write_4k:sequential_write:4K:0:100
         rand_read_4k:random_read:4K:100:0
         rand_write_4k:random_write:4K:0:100
         mixed_rw_70_30:mixed:4K:70:30
         mixed_rw_50_50:mixed:4K:50:50
+        seq_read_128k:sequential_read:128K:100:0
+        seq_write_128k:sequential_write:128K:0:100
         rand_read_128k:random_read:128K:100:0
         rand_write_128k:random_write:128K:0:100
         mixed_rw_70_30_128k:mixed:128K:70:30
@@ -134,7 +138,9 @@ summarize_results() {
     summarize_results_native
     local entry name log
     local names=(
+        seq_read_4k seq_write_4k
         rand_read_4k rand_write_4k mixed_rw_70_30 mixed_rw_50_50
+        seq_read_128k seq_write_128k
         rand_read_128k rand_write_128k mixed_rw_70_30_128k
     )
     for name in "${names[@]}"; do
@@ -147,6 +153,16 @@ summarize_results() {
 }
 
 FAIL=0
+
+run_case seq_read_4k \
+    workload=legacy read_ratio=100 write_ratio=0 block_size=0 \
+    io_pattern=sequential stripe_mode=global_die \
+    || FAIL=1
+
+run_case seq_write_4k \
+    workload=legacy read_ratio=0 write_ratio=100 block_size=0 \
+    io_pattern=sequential stripe_mode=global_die \
+    || FAIL=1
 
 run_case rand_read_4k \
     read_ratio=100 write_ratio=0 block_size=0 io_pattern=random \
@@ -162,6 +178,14 @@ run_case mixed_rw_70_30 \
 
 run_case mixed_rw_50_50 \
     read_ratio=50 write_ratio=50 block_size=0 io_pattern=random \
+    || FAIL=1
+
+run_case seq_read_128k \
+    workload=fulldev_seq_read block_size=131072 read_ratio=100 write_ratio=0 \
+    || FAIL=1
+
+run_case seq_write_128k \
+    workload=fulldev_seq_write block_size=131072 read_ratio=0 write_ratio=100 \
     || FAIL=1
 
 run_case rand_read_128k \

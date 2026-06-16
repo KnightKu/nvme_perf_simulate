@@ -12,6 +12,20 @@ from pathlib import Path
 from typing import Optional
 
 CASE_META: dict[str, dict[str, object]] = {
+    "seq_read_4k": {
+        "category": "sequential_read",
+        "label": "Sequential Read",
+        "block": "4K",
+        "read_ratio": 100,
+        "write_ratio": 0,
+    },
+    "seq_write_4k": {
+        "category": "sequential_write",
+        "label": "Sequential Write",
+        "block": "4K",
+        "read_ratio": 0,
+        "write_ratio": 100,
+    },
     "rand_read_4k": {
         "category": "random_read",
         "label": "Random Read",
@@ -39,6 +53,20 @@ CASE_META: dict[str, dict[str, object]] = {
         "block": "4K",
         "read_ratio": 50,
         "write_ratio": 50,
+    },
+    "seq_read_128k": {
+        "category": "sequential_read",
+        "label": "Sequential Read (fulldev)",
+        "block": "128K",
+        "read_ratio": 100,
+        "write_ratio": 0,
+    },
+    "seq_write_128k": {
+        "category": "sequential_write",
+        "label": "Sequential Write (fulldev)",
+        "block": "128K",
+        "read_ratio": 0,
+        "write_ratio": 100,
     },
     "rand_read_128k": {
         "category": "random_read",
@@ -242,9 +270,13 @@ def write_txt(path: Path, rows: list[CaseResult], out_dir: Path) -> None:
         )
 
     groups = [
+        ("Sequential Read (4K)", "sequential_read", "4K"),
+        ("Sequential Write (4K)", "sequential_write", "4K"),
         ("Random Read (4K)", "random_read", "4K"),
         ("Random Write (4K)", "random_write", "4K"),
         ("Mixed (4K)", "mixed", "4K"),
+        ("Sequential Read (128K)", "sequential_read", "128K"),
+        ("Sequential Write (128K)", "sequential_write", "128K"),
         ("Random Read (128K)", "random_read", "128K"),
         ("Random Write (128K)", "random_write", "128K"),
         ("Mixed (128K)", "mixed", "128K"),
@@ -317,6 +349,16 @@ def write_json(path: Path, rows: list[CaseResult]) -> None:
     payload = {
         "cases": [asdict(row) for row in rows],
         "groups": {
+            "sequential_read_4k": [
+                asdict(r)
+                for r in rows
+                if r.category == "sequential_read" and r.block == "4K"
+            ],
+            "sequential_write_4k": [
+                asdict(r)
+                for r in rows
+                if r.category == "sequential_write" and r.block == "4K"
+            ],
             "random_read_4k": [
                 asdict(r)
                 for r in rows
@@ -329,6 +371,16 @@ def write_json(path: Path, rows: list[CaseResult]) -> None:
             ],
             "mixed_4k": [
                 asdict(r) for r in rows if r.category == "mixed" and r.block == "4K"
+            ],
+            "sequential_read_128k": [
+                asdict(r)
+                for r in rows
+                if r.category == "sequential_read" and r.block == "128K"
+            ],
+            "sequential_write_128k": [
+                asdict(r)
+                for r in rows
+                if r.category == "sequential_write" and r.block == "128K"
             ],
             "random_read_128k": [
                 asdict(r)

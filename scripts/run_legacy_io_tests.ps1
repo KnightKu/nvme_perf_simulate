@@ -1,4 +1,4 @@
-# Run legacy random / mixed read-write benchmark cases (Windows PowerShell).
+# Run legacy / sequential / mixed IO benchmark cases (Windows PowerShell).
 #
 # Usage:
 #   .\scripts\run_legacy_io_tests.ps1
@@ -114,14 +114,20 @@ function Parse-PerfLog {
 
 function Summarize-ResultsNative {
     $caseOrder = @(
+        "seq_read_4k", "seq_write_4k",
         "rand_read_4k", "rand_write_4k", "mixed_rw_70_30", "mixed_rw_50_50",
+        "seq_read_128k", "seq_write_128k",
         "rand_read_128k", "rand_write_128k", "mixed_rw_70_30_128k"
     )
     $caseMeta = @{
+        seq_read_4k = @{ category = "sequential_read"; block = "4K"; read = 100; write = 0 }
+        seq_write_4k = @{ category = "sequential_write"; block = "4K"; read = 0; write = 100 }
         rand_read_4k = @{ category = "random_read"; block = "4K"; read = 100; write = 0 }
         rand_write_4k = @{ category = "random_write"; block = "4K"; read = 0; write = 100 }
         mixed_rw_70_30 = @{ category = "mixed"; block = "4K"; read = 70; write = 30 }
         mixed_rw_50_50 = @{ category = "mixed"; block = "4K"; read = 50; write = 50 }
+        seq_read_128k = @{ category = "sequential_read"; block = "128K"; read = 100; write = 0 }
+        seq_write_128k = @{ category = "sequential_write"; block = "128K"; read = 0; write = 100 }
         rand_read_128k = @{ category = "random_read"; block = "128K"; read = 100; write = 0 }
         rand_write_128k = @{ category = "random_write"; block = "128K"; read = 0; write = 100 }
         mixed_rw_70_30_128k = @{ category = "mixed"; block = "128K"; read = 70; write = 30 }
@@ -191,6 +197,16 @@ function Summarize-Results {
 
 $Fail = 0
 
+if (-not (Run-Case "seq_read_4k" @{
+        workload = "legacy"; read_ratio = 100; write_ratio = 0; block_size = 0
+        io_pattern = "sequential"; stripe_mode = "global_die"
+    })) { $Fail = 1 }
+
+if (-not (Run-Case "seq_write_4k" @{
+        workload = "legacy"; read_ratio = 0; write_ratio = 100; block_size = 0
+        io_pattern = "sequential"; stripe_mode = "global_die"
+    })) { $Fail = 1 }
+
 if (-not (Run-Case "rand_read_4k" @{
         read_ratio = 100; write_ratio = 0; block_size = 0; io_pattern = "random"
     })) { $Fail = 1 }
@@ -205,6 +221,16 @@ if (-not (Run-Case "mixed_rw_70_30" @{
 
 if (-not (Run-Case "mixed_rw_50_50" @{
         read_ratio = 50; write_ratio = 50; block_size = 0; io_pattern = "random"
+    })) { $Fail = 1 }
+
+if (-not (Run-Case "seq_read_128k" @{
+        workload = "fulldev_seq_read"; block_size = 131072
+        read_ratio = 100; write_ratio = 0
+    })) { $Fail = 1 }
+
+if (-not (Run-Case "seq_write_128k" @{
+        workload = "fulldev_seq_write"; block_size = 131072
+        read_ratio = 0; write_ratio = 100
     })) { $Fail = 1 }
 
 if (-not (Run-Case "rand_read_128k" @{
