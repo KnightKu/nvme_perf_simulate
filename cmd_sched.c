@@ -6,6 +6,7 @@
 #include "cmd_pool.h"
 #include "cw_path.h"
 #include "sched_internal.h"
+#include "write_cache.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -326,7 +327,8 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                                     int *inflight_cmds,
                                     uint64_t *total_cmd,
                                     uint64_t *write_cmd,
-                                    uint64_t *erase_cmd) {
+                                    uint64_t *erase_cmd,
+                                    uint64_t *nand_program_pages) {
     int j;
     int completed = 0;
 
@@ -337,7 +339,16 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
             plane_slot_t *ps = slot_at(ctx, slot);
             if ((ps->state == DIE_WRITE_WAIT ||
                  ps->state == DIE_ERASE_WAIT) &&
-                ps->act != 0xFFF && cur_time >= ps->time) {
+                cur_time >= ps->time) {
+                if (ps->state == DIE_WRITE_WAIT && ps->cache_flush) {
+                    write_cache_tprog_complete(chan_id, j, slot, cur_time,
+                                               nand_program_pages);
+                    completed++;
+                    continue;
+                }
+                if (ps->act == 0xFFF) {
+                    continue;
+                }
                 int act = ps->act;
 
                 if (ps->state == DIE_WRITE_WAIT &&
@@ -610,6 +621,7 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->host_write_chunk_bytes = 4096;
     cfg->read_bus_bandwidth = 0;
     cfg->write_page_coalesce = 1;
+    cfg->write_cache = 1;
 }
 
 static int set_config_value(perf_config_t *cfg, const char *key,
@@ -741,6 +753,8 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->read_bus_bandwidth = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "write_page_coalesce") == 0) {
         cfg->write_page_coalesce = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "write_cache") == 0) {
+        cfg->write_cache = (int)strtol(value, &end, 10);
     } else {
         return 0;
     }
@@ -1096,6 +1110,8 @@ int perf_init(const perf_config_t *cfg) {
 
     bus_xfer_init();
 
+    write_cache_init();
+
     if (cw_path_init() != 0) {
         perf_cleanup();
         return -1;
@@ -1124,9 +1140,11 @@ int perf_init(const perf_config_t *cfg) {
                 ctx->slots[slot_idx].page_idx = -1;
                 ctx->slots[slot_idx].cw_idx = 0;
                 ctx->slots[slot_idx].coalesce_prog = 0;
+                ctx->slots[slot_idx].cache_flush = 0;
             }
             ctx->wr_coalesce.fill = 0;
             ctx->wr_coalesce.prog_count = 0;
+            ctx->wr_cache.fill_frags = 0;
             ctx->suspended_slot = -1;
             ctx->suspended_act = 0xFFF;
             ctx->suspended_op = OP_MAX;
@@ -1201,6 +1219,7 @@ void perf_cleanup(void) {
     cmd_pool_cleanup();
     bus_xfer_cleanup();
     cw_path_cleanup();
+    write_cache_cleanup();
     free(g_state.cmd_cw_read_done);
     free(g_state.cmd_cw_write_done);
     free(g_state.die_ctx);
@@ -1234,6 +1253,7 @@ void perf_run(perf_stats_t *stats) {
     uint64_t pool_rejects = 0;
     uint64_t bus_xfers = 0;
     uint64_t bus_bytes = 0;
+    uint64_t nand_program_pages = 0;
     int tmp_cmd_cnt = 0;
     int inflight_cmds = 0;
     uint64_t start_time = 0;
@@ -1242,6 +1262,13 @@ void perf_run(perf_stats_t *stats) {
         .inflight_cmds = &inflight_cmds,
         .total_cmd = &total_cmd,
         .read_cmd = &read_cmd,
+    };
+    write_cache_ctx_t wc_ctx = {
+        .inflight_cmds = &inflight_cmds,
+        .total_cmd = &total_cmd,
+        .write_cmd = &write_cmd,
+        .write_bytes = &write_bytes,
+        .nand_program_pages = &nand_program_pages,
     };
 
     if (!g_state.initialized) {
@@ -1268,7 +1295,7 @@ void perf_run(perf_stats_t *stats) {
             int progressed = 0;
             uint64_t next_event = UINT64_MAX;
 
-        if (bus_process(sim_time, &bus_xfers, &bus_bytes) > 0) {
+        if (bus_process(sim_time, &bus_xfers, &bus_bytes, &wc_ctx) > 0) {
             progressed = 1;
         }
 
@@ -1282,7 +1309,8 @@ void perf_run(perf_stats_t *stats) {
                 case CHAN_IDLE:
                     cur_time = sim_time;
                     if (complete_wait_ops(i, cur_time, &inflight_cmds, &total_cmd,
-                                          &write_cmd, &erase_cmd) > 0) {
+                                          &write_cmd, &erase_cmd,
+                                          &nand_program_pages) > 0) {
                         progressed = 1;
                     }
 
@@ -1297,6 +1325,11 @@ void perf_run(perf_stats_t *stats) {
                     }
 
                     if (try_schedule_read_data(i, cur_time)) {
+                        progressed = 1;
+                        break;
+                    }
+
+                    if (write_cache_try_schedule_flush(i, cur_time)) {
                         progressed = 1;
                         break;
                     }
@@ -1453,6 +1486,11 @@ void perf_run(perf_stats_t *stats) {
                                 progressed = 1;
                                 break;
                             }
+                            if (g_state.chan[i].act == 0xFFF &&
+                                write_cache_chan_data_complete(i, cur_time)) {
+                                progressed = 1;
+                                break;
+                            }
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
                             int act = g_state.chan[i].act;
@@ -1561,6 +1599,7 @@ void perf_run(perf_stats_t *stats) {
         stats->read_bus_bytes = g_state.read_bus_bytes;
         stats->chan_read_wire_bytes = g_state.chan_read_wire_bytes;
         stats->chan_write_wire_bytes = g_state.chan_write_wire_bytes;
+        stats->nand_program_pages = nand_program_pages;
     }
 }
 

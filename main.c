@@ -68,6 +68,8 @@ int main(int argc, char **argv) {
            (unsigned long long)stats.pool_rejects,
            (unsigned long long)stats.bus_xfers,
            (unsigned long long)stats.bus_bytes);
+    printf("NAND program pages = %llu\n",
+           (unsigned long long)stats.nand_program_pages);
 
     perf_cleanup();
     return 0;

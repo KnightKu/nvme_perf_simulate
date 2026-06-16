@@ -2,6 +2,7 @@
 
 #include "cmd_pool.h"
 #include "sched_internal.h"
+#include "write_cache.h"
 
 #include <stdint.h>
 
@@ -28,11 +29,14 @@ static uint64_t bus_cmd_xfer_time(void) {
     return xfer_time;
 }
 
-static int bus_complete_xfer(uint64_t *bus_xfers, uint64_t *bus_bytes) {
+static int bus_complete_xfer(uint64_t *bus_xfers, uint64_t *bus_bytes,
+                             const write_cache_ctx_t *write_cache_ctx) {
     int act = g_state.bus.active_act;
 
-    enqueue_cmd(g_state.cmd_target_chan[act], g_state.cmd_target_die[act],
-                g_state.cmd_op[act], g_state.cmd_prio[act], act);
+    if (!write_cache_on_write_cmd(act, write_cache_ctx)) {
+        enqueue_cmd(g_state.cmd_target_chan[act], g_state.cmd_target_die[act],
+                    g_state.cmd_op[act], g_state.cmd_prio[act], act);
+    }
     g_state.bus.state = BUS_IDLE;
     g_state.bus.active_act = -1;
     g_state.bus.busy_until = 0;
@@ -45,12 +49,13 @@ static int bus_complete_xfer(uint64_t *bus_xfers, uint64_t *bus_bytes) {
     return 1;
 }
 
-int bus_process(uint64_t sim_time, uint64_t *bus_xfers, uint64_t *bus_bytes) {
+int bus_process(uint64_t sim_time, uint64_t *bus_xfers, uint64_t *bus_bytes,
+                const write_cache_ctx_t *write_cache_ctx) {
     int progressed = 0;
 
     if (g_state.bus.state == BUS_XFER &&
         sim_time >= g_state.bus.busy_until) {
-        progressed |= bus_complete_xfer(bus_xfers, bus_bytes);
+        progressed |= bus_complete_xfer(bus_xfers, bus_bytes, write_cache_ctx);
     }
 
     if (g_state.bus.state == BUS_IDLE && !cmd_pool_empty()) {
@@ -60,7 +65,7 @@ int bus_process(uint64_t sim_time, uint64_t *bus_xfers, uint64_t *bus_bytes) {
         g_state.bus.active_act = act;
         g_state.bus.busy_until = sim_time + bus_cmd_xfer_time();
         if (sim_time >= g_state.bus.busy_until) {
-            progressed |= bus_complete_xfer(bus_xfers, bus_bytes);
+            progressed |= bus_complete_xfer(bus_xfers, bus_bytes, write_cache_ctx);
         }
     }
 

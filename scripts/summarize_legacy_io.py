@@ -109,6 +109,7 @@ PATTERNS = {
     ),
     "pool_rejects": re.compile(r"Pool rejects = (\d+)"),
     "bus_xfers": re.compile(r"Bus xfers = (\d+)"),
+    "nand_program_pages": re.compile(r"NAND program pages = (\d+)"),
 }
 
 

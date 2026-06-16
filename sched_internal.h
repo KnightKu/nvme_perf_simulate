@@ -76,6 +76,7 @@ typedef struct plane_slot_s {
     int page_idx;
     int cw_idx;
     int coalesce_prog;
+    int cache_flush;
 } plane_slot_t;
 
 #define MAX_WRITE_FRAGS 8
@@ -86,6 +87,10 @@ typedef struct page_coalesce_s {
     int prog_count;
     int prog_acts[MAX_WRITE_FRAGS];
 } page_coalesce_t;
+
+typedef struct write_cache_s {
+    int fill_frags;
+} write_cache_t;
 
 typedef struct die_ctx_s {
     queue_t q[PRIO_MAX][OP_MAX];
@@ -98,6 +103,7 @@ typedef struct die_ctx_s {
     int suspend_write_cnt;
     int suspend_erase_cnt;
     page_coalesce_t wr_coalesce;
+    write_cache_t wr_cache;
 } die_ctx_t;
 
 typedef struct chan_s {
@@ -247,8 +253,14 @@ void select_target(int *chan_id, int *die_in_chan);
 
 static inline int use_write_page_coalesce(void) {
     return g_state.cfg.write_page_coalesce &&
+           !g_state.cfg.write_cache &&
            g_state.cfg.block_size == 0 &&
            g_state.d.frags_per_write_page > 1 &&
+           !g_state.cfg.use_codeword_buffers;
+}
+
+static inline int use_write_cache(void) {
+    return g_state.cfg.write_cache && g_state.cfg.block_size == 0 &&
            !g_state.cfg.use_codeword_buffers;
 }
 

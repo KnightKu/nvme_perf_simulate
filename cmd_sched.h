@@ -59,6 +59,7 @@ typedef struct perf_config {
     int host_write_chunk_bytes;
     int read_bus_bandwidth; /* MB/s; 0 = unlimited */
     int write_page_coalesce; /* legacy block_size=0: merge host frags before tprog */
+    int write_cache;         /* legacy block_size=0: host complete on cache, async flush */
 } perf_config_t;
 
 typedef struct perf_stats {
@@ -76,6 +77,7 @@ typedef struct perf_stats {
     uint64_t read_bus_bytes;
     uint64_t chan_read_wire_bytes;
     uint64_t chan_write_wire_bytes;
+    uint64_t nand_program_pages;
 } perf_stats_t;
 
 typedef struct perf_iops {
