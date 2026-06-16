@@ -346,6 +346,12 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                     completed++;
                     continue;
                 }
+                if (ps->state == DIE_WRITE_WAIT && ps->act == 0xFFF) {
+                    ps->state = DIE_IDLE;
+                    ps->page_idx = -1;
+                    completed++;
+                    continue;
+                }
                 if (ps->act == 0xFFF) {
                     continue;
                 }
@@ -447,6 +453,10 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
                          ps->state == DIE_ERASE_WAIT) &&
                         ps->time > cur_time) {
                         if (ps->state == DIE_WRITE_WAIT &&
+                            ps->cache_flush) {
+                            continue;
+                        }
+                        if (ps->state == DIE_WRITE_WAIT &&
                             ctx->suspend_write_cnt >= MAX_SUSPEND_WRITE) {
                             continue;
                         }
@@ -456,6 +466,7 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
                         }
                         ctx->suspended_slot = s;
                         ctx->suspended_act = ps->act;
+                        ctx->suspended_cache_flush = ps->cache_flush;
                         ctx->suspended_op =
                             (ps->state == DIE_WRITE_WAIT) ? OP_WRITE
                                                           : OP_ERASE;
@@ -466,6 +477,7 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
                             ctx->suspend_erase_cnt++;
                         }
                         ps->act = 0xFFF;
+                        ps->cache_flush = 0;
                         ps->state = DIE_IDLE;
                         slot = s;
                         break;
@@ -1149,6 +1161,7 @@ int perf_init(const perf_config_t *cfg) {
             ctx->suspended_act = 0xFFF;
             ctx->suspended_op = OP_MAX;
             ctx->suspended_time = 0;
+            ctx->suspended_cache_flush = 0;
             ctx->suspend_write_cnt = 0;
             ctx->suspend_erase_cnt = 0;
             for (prio = 0; prio < PRIO_MAX; prio++) {
@@ -1462,6 +1475,7 @@ void perf_run(perf_stats_t *stats) {
                                 plane_slot_t *sps =
                                     slot_at(ctx, ctx->suspended_slot);
                                 sps->act = ctx->suspended_act;
+                                sps->cache_flush = ctx->suspended_cache_flush;
                                 sps->time = cur_time + ctx->suspended_time;
                                 sps->state = (ctx->suspended_op == OP_WRITE)
                                                  ? DIE_WRITE_WAIT
@@ -1473,6 +1487,7 @@ void perf_run(perf_stats_t *stats) {
                                 ctx->suspended_act = 0xFFF;
                                 ctx->suspended_op = OP_MAX;
                                 ctx->suspended_time = 0;
+                                ctx->suspended_cache_flush = 0;
                                 ctx->suspended_slot = -1;
                             } else if (!g_state.cmd_page_stripe[act]) {
                                 ps->act = 0xFFF;

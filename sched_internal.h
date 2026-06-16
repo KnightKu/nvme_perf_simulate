@@ -102,6 +102,7 @@ typedef struct die_ctx_s {
     uint64_t suspended_time;
     int suspend_write_cnt;
     int suspend_erase_cnt;
+    int suspended_cache_flush;
     page_coalesce_t wr_coalesce;
     write_cache_t wr_cache;
 } die_ctx_t;
