@@ -58,6 +58,7 @@ typedef struct perf_config {
     int host_read_chunk_bytes;
     int host_write_chunk_bytes;
     int read_bus_bandwidth; /* MB/s; 0 = unlimited */
+    int write_page_coalesce; /* legacy block_size=0: merge host frags before tprog */
 } perf_config_t;
 
 typedef struct perf_stats {

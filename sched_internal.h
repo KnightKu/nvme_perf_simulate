@@ -75,7 +75,17 @@ typedef struct plane_slot_s {
     int host_pages_left;
     int page_idx;
     int cw_idx;
+    int coalesce_prog;
 } plane_slot_t;
+
+#define MAX_WRITE_FRAGS 8
+
+typedef struct page_coalesce_s {
+    int fill;
+    int acts[MAX_WRITE_FRAGS];
+    int prog_count;
+    int prog_acts[MAX_WRITE_FRAGS];
+} page_coalesce_t;
 
 typedef struct die_ctx_s {
     queue_t q[PRIO_MAX][OP_MAX];
@@ -87,6 +97,7 @@ typedef struct die_ctx_s {
     uint64_t suspended_time;
     int suspend_write_cnt;
     int suspend_erase_cnt;
+    page_coalesce_t wr_coalesce;
 } die_ctx_t;
 
 typedef struct chan_s {
@@ -108,6 +119,7 @@ typedef struct perf_derived {
     uint64_t terase;
     uint64_t data_time_read_page;
     uint64_t data_time_write_page;
+    uint64_t data_time_write_fragment;
     uint64_t data_time_read_cw;
     uint64_t data_time_write_cw;
     int pages_per_block;
@@ -121,6 +133,8 @@ typedef struct perf_derived {
     int write_xfer_size;
     int read_bytes_per_page;
     int write_bytes_per_page;
+    int write_fragment_bytes;
+    int frags_per_write_page;
     int read_bytes_per_cmd;
     int write_bytes_per_cmd;
     double read_ceiling_mbps;
@@ -230,5 +244,12 @@ void complete_host_page_stripe(int act, int op, int *inflight_cmds,
 void stripe_page_target(int stripe_base, int page_idx, int *chan_id,
                         int *die_in_chan);
 void select_target(int *chan_id, int *die_in_chan);
+
+static inline int use_write_page_coalesce(void) {
+    return g_state.cfg.write_page_coalesce &&
+           g_state.cfg.block_size == 0 &&
+           g_state.d.frags_per_write_page > 1 &&
+           !g_state.cfg.use_codeword_buffers;
+}
 
 #endif

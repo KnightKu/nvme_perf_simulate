@@ -55,6 +55,7 @@ Total Bandwidth (sim) = ...
 - `page_size`：NAND 页大小（如 16384）；每页写线速含 `page_parity_size`（如 1952）
 - `block_size`：主机 IO 总大小，须为 `page_size` 整数倍；按页多次 `CHAN_DATA`
 - `block_size=0`：legacy 单页（读=`cmd_size`+`ecc_parity_size`，写=`page_size`+`page_parity_size`）
+- `write_page_coalesce=1`（默认，仅 `block_size=0` 且非 codeword 路径）：写按 **cmd_size 分片** 传 DATA，**每 die 凑满一页** 后 **一次 tprog**，完成该页内全部 host 写命令。
 - `ecc_parity_size` / `page_size` / `page_parity_size`
 - `tr_fast` / `tr` / `tprog_eff` / `nand_type` / `terase`
 

@@ -78,6 +78,29 @@ void complete_host_page_stripe(int act, int op,
     }
 }
 
+static void complete_coalesced_page_write(die_ctx_t *ctx, plane_slot_t *ps,
+                                          int *inflight_cmds,
+                                          uint64_t *total_cmd,
+                                          uint64_t *write_cmd) {
+    page_coalesce_t *wc = &ctx->wr_coalesce;
+    int i;
+
+    for (i = 0; i < wc->prog_count; i++) {
+        int act = wc->prog_acts[i];
+
+        g_state.map[act] = 0;
+        (*inflight_cmds)--;
+        (*total_cmd)++;
+        (*write_cmd)++;
+    }
+    wc->prog_count = 0;
+    ps->coalesce_prog = 0;
+    ps->act = 0xFFF;
+    ps->state = DIE_IDLE;
+    ps->page_idx = -1;
+    ps->host_pages_left = 0;
+}
+
 static int try_launch_striped_page(int act, int op, int page_idx,
                                    uint64_t cur_time) {
     int base = g_state.cmd_stripe_base[act];
@@ -318,6 +341,14 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                 int act = ps->act;
 
                 if (ps->state == DIE_WRITE_WAIT &&
+                    ps->coalesce_prog) {
+                    complete_coalesced_page_write(ctx, ps, inflight_cmds,
+                                                  total_cmd, write_cmd);
+                    completed++;
+                    continue;
+                }
+
+                if (ps->state == DIE_WRITE_WAIT &&
                     g_state.cmd_op[act] == OP_WRITE &&
                     !g_state.cmd_page_stripe[act] &&
                     ps->host_pages_left > 1) {
@@ -508,10 +539,15 @@ static inline int try_schedule_write_data(int chan_id, uint64_t cur_time) {
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
             if (ps->state == DIE_WRITE_DATA_READY) {
+                uint64_t data_time = g_state.d.data_time_write_page;
+
+                if (use_write_page_coalesce() &&
+                    !g_state.cmd_page_stripe[ps->act]) {
+                    data_time = g_state.d.data_time_write_fragment;
+                }
                 g_state.chan[chan_id].state = CHAN_DATA;
                 g_state.chan[chan_id].pages_left = 0;
-                g_state.chan[chan_id].time =
-                    cur_time + g_state.d.data_time_write_page;
+                g_state.chan[chan_id].time = cur_time + data_time;
                 g_state.chan[chan_id].act = ps->act;
                 g_state.chan[chan_id].op = OP_WRITE;
                 g_state.chan[chan_id].die = die;
@@ -573,6 +609,7 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->host_read_chunk_bytes = 4096;
     cfg->host_write_chunk_bytes = 4096;
     cfg->read_bus_bandwidth = 0;
+    cfg->write_page_coalesce = 1;
 }
 
 static int set_config_value(perf_config_t *cfg, const char *key,
@@ -702,6 +739,8 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         cfg->host_write_chunk_bytes = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "read_bus_bandwidth") == 0) {
         cfg->read_bus_bandwidth = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "write_page_coalesce") == 0) {
+        cfg->write_page_coalesce = (int)strtol(value, &end, 10);
     } else {
         return 0;
     }
@@ -936,6 +975,28 @@ int perf_init(const perf_config_t *cfg) {
         g_state.d.data_time_write_page =
             write_wire_page * TIME_SCALE / (uint64_t)cfg->chan_speed;
         {
+            int frags = 1;
+            int frag_bytes = cfg->cmd_size;
+            uint64_t frag_wire;
+
+            if (cfg->block_size == 0) {
+                if (cfg->page_size % cfg->cmd_size != 0) {
+                    return -1;
+                }
+                frags = cfg->page_size / cfg->cmd_size;
+                frag_bytes = cfg->cmd_size;
+            }
+            if (frags > MAX_WRITE_FRAGS) {
+                return -1;
+            }
+            g_state.d.frags_per_write_page = frags;
+            g_state.d.write_fragment_bytes = frag_bytes;
+            frag_wire = (uint64_t)frag_bytes +
+                        (uint64_t)cfg->page_parity_size / (uint64_t)frags;
+            g_state.d.data_time_write_fragment =
+                frag_wire * TIME_SCALE / (uint64_t)cfg->chan_speed;
+        }
+        {
             int cw_host = cfg->codeword_host_bytes > 0
                               ? cfg->codeword_host_bytes
                               : 4096;
@@ -1062,7 +1123,10 @@ int perf_init(const perf_config_t *cfg) {
                 ctx->slots[slot_idx].host_pages_left = 0;
                 ctx->slots[slot_idx].page_idx = -1;
                 ctx->slots[slot_idx].cw_idx = 0;
+                ctx->slots[slot_idx].coalesce_prog = 0;
             }
+            ctx->wr_coalesce.fill = 0;
+            ctx->wr_coalesce.prog_count = 0;
             ctx->suspended_slot = -1;
             ctx->suspended_act = 0xFFF;
             ctx->suspended_op = OP_MAX;
@@ -1391,11 +1455,37 @@ void perf_run(perf_stats_t *stats) {
                             }
                             die_ctx_t *ctx = die_ctx_at(i, g_state.chan[i].die);
                             plane_slot_t *ps = slot_at(ctx, g_state.chan[i].slot);
+                            int act = g_state.chan[i].act;
 
-                            write_bytes +=
-                                (uint64_t)g_state.d.write_bytes_per_page;
-                            ps->state = DIE_WRITE_WAIT;
-                            ps->time = cur_time + g_state.d.tprog;
+                            if (use_write_page_coalesce() &&
+                                !g_state.cmd_page_stripe[act]) {
+                                page_coalesce_t *wc = &ctx->wr_coalesce;
+
+                                write_bytes +=
+                                    (uint64_t)g_state.d.write_fragment_bytes;
+                                wc->acts[wc->fill++] = act;
+                                if (wc->fill >= g_state.d.frags_per_write_page) {
+                                    int k;
+
+                                    for (k = 0; k < wc->fill; k++) {
+                                        wc->prog_acts[k] = wc->acts[k];
+                                    }
+                                    wc->prog_count = wc->fill;
+                                    wc->fill = 0;
+                                    ps->state = DIE_WRITE_WAIT;
+                                    ps->time = cur_time + g_state.d.tprog;
+                                    ps->coalesce_prog = 1;
+                                } else {
+                                    ps->act = 0xFFF;
+                                    ps->state = DIE_IDLE;
+                                    ps->page_idx = -1;
+                                }
+                            } else {
+                                write_bytes +=
+                                    (uint64_t)g_state.d.write_bytes_per_page;
+                                ps->state = DIE_WRITE_WAIT;
+                                ps->time = cur_time + g_state.d.tprog;
+                            }
                         }
                         g_state.chan[i].act = 0xFFF;
                         g_state.chan[i].state = CHAN_IDLE;
