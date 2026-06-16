@@ -352,6 +352,12 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                     completed++;
                     continue;
                 }
+                if (ps->state == DIE_ERASE_WAIT && ps->act == 0xFFF) {
+                    ps->state = DIE_IDLE;
+                    ps->page_idx = -1;
+                    completed++;
+                    continue;
+                }
                 if (ps->act == 0xFFF) {
                     continue;
                 }
@@ -507,6 +513,8 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
             slot_at(ctx, slot)->act = act;
             slot_at(ctx, slot)->page_idx = -1;
             slot_at(ctx, slot)->cw_idx = 0;
+            slot_at(ctx, slot)->coalesce_prog = 0;
+            slot_at(ctx, slot)->cache_flush = 0;
             slot_at(ctx, slot)->state = DIE_CMD;
 
             g_state.chan[chan_id].state = CHAN_CMD;
@@ -1298,7 +1306,7 @@ void perf_run(perf_stats_t *stats) {
     }
 
     while (1) {
-        if (total_cmd > g_state.cfg.element && inflight_cmds == 0 &&
+        if (total_cmd >= g_state.cfg.element && inflight_cmds == 0 &&
             !write_cache_has_pending()) {
             break;
         }
@@ -1312,7 +1320,9 @@ void perf_run(perf_stats_t *stats) {
             start_time = sim_time;
         }
 
-        cmd_generate_try(tmp_cmd_cnt, &inflight_cmds, &pool_rejects);
+        if (total_cmd < g_state.cfg.element) {
+            cmd_generate_try(tmp_cmd_cnt, &inflight_cmds, &pool_rejects);
+        }
 
         {
             int progressed = 0;
@@ -1344,13 +1354,13 @@ void perf_run(perf_stats_t *stats) {
                         progressed = 1;
                     }
 
-                    // Priority: read cmd, read data, write data, write/erase cmd.
-                    if (try_schedule_cmd(i, cur_time, OP_READ)) {
+                    /* Service ready read data before issuing new read CMDs. */
+                    if (try_schedule_read_data(i, cur_time)) {
                         progressed = 1;
                         break;
                     }
 
-                    if (try_schedule_read_data(i, cur_time)) {
+                    if (try_schedule_cmd(i, cur_time, OP_READ)) {
                         progressed = 1;
                         break;
                     }
@@ -1600,6 +1610,11 @@ void perf_run(perf_stats_t *stats) {
                     }
                 }
                 if (next_event == UINT64_MAX) {
+                    if (inflight_cmds == 0 &&
+                        total_cmd >= g_state.cfg.element &&
+                        !write_cache_has_pending()) {
+                        goto perf_run_done;
+                    }
                     break;
                 }
                 sim_time = next_event;
@@ -1607,6 +1622,7 @@ void perf_run(perf_stats_t *stats) {
         }
     }
 
+perf_run_done:
     end_time = sim_time;
     if (stats) {
         stats->total_cmd = total_cmd;

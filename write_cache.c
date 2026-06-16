@@ -45,7 +45,8 @@ int write_cache_on_write_cmd(int act, const write_cache_ctx_t *ctx) {
 int write_cache_try_schedule_flush(int chan_id, uint64_t cur_time) {
     int j;
 
-    if (!g_state.cfg.write_cache || g_state.cfg.block_size != 0) {
+    if (!g_state.cfg.write_cache || g_state.cfg.block_size != 0 ||
+        g_state.cfg.write_ratio <= 0) {
         return 0;
     }
 
@@ -95,7 +96,8 @@ int write_cache_has_pending(void) {
     int chan_id;
     int die;
 
-    if (!g_state.cfg.write_cache || g_state.cfg.block_size != 0) {
+    if (!g_state.cfg.write_cache || g_state.cfg.block_size != 0 ||
+        g_state.cfg.write_ratio <= 0) {
         return 0;
     }
 
