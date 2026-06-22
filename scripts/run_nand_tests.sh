@@ -5,17 +5,32 @@
 #   ./scripts/run_nand_tests.sh
 #   ELEMENT=8192 QD=512 ./scripts/run_nand_tests.sh
 #
+# Case configs live in tests/nand/*.conf (one file per benchmark case).
 # Outputs per-case logs under tests/out_nand/ and summary files via summarize_nand.py.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${BIN:-$ROOT/nvme_perf_model}"
-BASELINE="${BASELINE:-$ROOT/tests/baseline_nand.conf}"
+CASES_DIR="${CASES_DIR:-$ROOT/tests/nand}"
 OUT_DIR="${OUT_DIR:-$ROOT/tests/out_nand}"
 ELEMENT="${ELEMENT:-16384}"
 QD="${QD:-1024}"
 SUMMARIZE="${SUMMARIZE:-$ROOT/scripts/summarize_nand.py}"
+
+CASES=(
+    seq_read_4k
+    seq_write_4k
+    rand_read_4k
+    rand_write_4k
+    mixed_rw_70_30
+    mixed_rw_50_50
+    seq_read_128k
+    seq_write_128k
+    rand_read_128k
+    rand_write_128k
+    mixed_rw_70_30_128k
+)
 
 mkdir -p "$OUT_DIR"
 
@@ -28,38 +43,27 @@ if [[ ! -x "$BIN" ]]; then
     fi
 fi
 
-if [[ ! -f "$BASELINE" ]]; then
-    echo "error: baseline config not found: $BASELINE" >&2
-    exit 1
-fi
+prepare_conf() {
+    local name="$1"
+    local src="$CASES_DIR/${name}.conf"
+    local out="$OUT_DIR/${name}.conf"
 
-write_conf() {
-    local out="$1"
-    shift
-    cp "$BASELINE" "$out"
+    if [[ ! -f "$src" ]]; then
+        echo "error: case config not found: $src" >&2
+        return 1
+    fi
+    cp "$src" "$out"
     sed -i.bak "s/^element=.*/element=${ELEMENT}/" "$out"
     sed -i.bak "s/^qd=.*/qd=${QD}/" "$out"
     rm -f "${out}.bak"
-    local kv key val
-    for kv in "$@"; do
-        key="${kv%%=*}"
-        val="${kv#*=}"
-        if grep -q "^${key}=" "$out"; then
-            sed -i.bak "s/^${key}=.*/${key}=${val}/" "$out"
-        else
-            echo "${key}=${val}" >> "$out"
-        fi
-        rm -f "${out}.bak"
-    done
 }
 
 run_case() {
     local name="$1"
-    shift
     local conf="$OUT_DIR/${name}.conf"
     local log="$OUT_DIR/${name}.log"
 
-    write_conf "$conf" "$@"
+    prepare_conf "$name"
     echo "==> $name"
     echo "    config: $conf"
     if ! "$BIN" "$conf" | tee "$log"; then
@@ -86,56 +90,9 @@ summarize_results() {
 
 FAIL=0
 
-run_case seq_read_4k \
-    read_ratio=100 write_ratio=0 block_size=0 \
-    io_pattern=sequential stripe_mode=global_die \
-    || FAIL=1
-
-run_case seq_write_4k \
-    read_ratio=0 write_ratio=100 block_size=0 \
-    io_pattern=sequential stripe_mode=global_die \
-    || FAIL=1
-
-run_case rand_read_4k \
-    read_ratio=100 write_ratio=0 block_size=0 io_pattern=random \
-    || FAIL=1
-
-run_case rand_write_4k \
-    read_ratio=0 write_ratio=100 block_size=0 io_pattern=random \
-    || FAIL=1
-
-run_case mixed_rw_70_30 \
-    read_ratio=70 write_ratio=30 block_size=0 io_pattern=random \
-    || FAIL=1
-
-run_case mixed_rw_50_50 \
-    read_ratio=50 write_ratio=50 block_size=0 io_pattern=random \
-    || FAIL=1
-
-run_case seq_read_128k \
-    block_size=131072 read_ratio=100 write_ratio=0 \
-    io_pattern=sequential stripe_mode=page_stripe \
-    || FAIL=1
-
-run_case seq_write_128k \
-    block_size=131072 read_ratio=0 write_ratio=100 \
-    io_pattern=sequential stripe_mode=page_stripe \
-    || FAIL=1
-
-run_case rand_read_128k \
-    read_ratio=100 write_ratio=0 block_size=131072 io_pattern=random \
-    stripe_mode=channel_major \
-    || FAIL=1
-
-run_case rand_write_128k \
-    read_ratio=0 write_ratio=100 block_size=131072 io_pattern=random \
-    stripe_mode=channel_major \
-    || FAIL=1
-
-run_case mixed_rw_70_30_128k \
-    read_ratio=70 write_ratio=30 block_size=131072 io_pattern=random \
-    stripe_mode=channel_major \
-    || FAIL=1
+for name in "${CASES[@]}"; do
+    run_case "$name" || FAIL=1
+done
 
 echo "========================================"
 if [[ "$FAIL" -ne 0 ]]; then

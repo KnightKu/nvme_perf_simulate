@@ -24,10 +24,17 @@ make
 Run sequential / random / mixed read-write cases (4K and 128K):
 
 ```bash
-make test-nand
+make nand-core
 # or
+make test-nand
 ./scripts/run_nand_tests.sh
 python3 scripts/summarize_nand.py tests/out_nand
+```
+
+Per-case configs are in `tests/nand/*.conf` (11 files). Run a single case:
+
+```bash
+./nvme_perf_model tests/nand/seq_read_4k.conf
 ```
 
 Outputs land in `tests/out_nand/` (`*.log`, `summary.csv`, `summary.txt`, `summary.json`).
