@@ -1,12 +1,10 @@
 TARGET := nvme_perf_model
-SRCS := main.c cmd_sched.c cmd_generate.c cmd_pool.c bus_xfer.c \
-        chan_cw_buf.c read_bus.c output_buffer.c host_port.c cw_path.c \
-        write_cache.c
+SRCS := main.c cmd_sched.c cmd_generate.c
 
 CC ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 
-.PHONY: all clean test-legacy summarize-legacy
+.PHONY: all clean test-nand summarize-nand
 
 all: $(TARGET)
 
@@ -16,8 +14,8 @@ $(TARGET): $(SRCS)
 clean:
 	$(RM) $(TARGET)
 
-test-legacy: $(TARGET)
-	bash scripts/run_legacy_io_tests.sh
+test-nand: $(TARGET)
+	bash scripts/run_nand_tests.sh
 
-summarize-legacy:
-	python3 scripts/summarize_legacy_io.py tests/out
+summarize-nand:
+	python3 scripts/summarize_nand.py tests/out_nand
