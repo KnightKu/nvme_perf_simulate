@@ -59,6 +59,16 @@ io_pattern=sequential
 stripe_mode=global_die
 ```
 
+Multi-page blocks fan out across planes on the target die. Concurrent plane
+count follows DESIGN.md §7: `max_planes_per_die = iwl_slot / die_num` (must be
+a power of two). With the default 128 die / 512 iwl_slot config that is **4
+planes** in parallel per die.
+
+- **Read**: one tR per block, then up to `max_planes_per_die` page DATA
+  transfers in parallel (channel still serial).
+- **Write**: each page does DATA then **one tprog**; up to `max_planes_per_die`
+  pages pipeline DATA/tprog in parallel on the same die.
+
 ## Output metrics
 
 - **IOPS / Bandwidth**: host-visible completion rate (xor-adjusted for RAID-like factor)

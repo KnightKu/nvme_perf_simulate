@@ -33,6 +33,7 @@ enum DIE_STATE {
     DIE_IDLE,
     DIE_CMD,
     DIE_READ_WAIT,
+    DIE_READ_DATA_READY,
     DIE_READ_DATA,
     DIE_WRITE_DATA_READY,
     DIE_WRITE_DATA,
@@ -52,7 +53,6 @@ typedef struct plane_slot_s {
     int state;
     int act;
     uint64_t time;
-    int host_pages_left;
 } plane_slot_t;
 
 typedef struct die_ctx_s {
@@ -101,6 +101,8 @@ typedef struct perf_state {
     int *cmd_op;
     int *cmd_target_chan;
     int *cmd_target_die;
+    int *cmd_pages_left;
+    int *cmd_pages_assigned;
     die_ctx_t *die_ctx;
     int *rr_die;
     int *stripe_cursor;

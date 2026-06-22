@@ -58,6 +58,47 @@ void enqueue_cmd(int chan_id, int die_in_chan, int op, int act) {
     queue_push(&ctx->q[op], act);
 }
 
+static void fanout_plane_pages(die_ctx_t *ctx, int act, int data_ready_state) {
+    int pages = g_state.d.pages_per_block;
+    int max_p = g_state.d.max_planes_per_die;
+    int s;
+    int launched = 0;
+
+    for (s = 0; s < ctx->slot_count; s++) {
+        plane_slot_t *ps = slot_at(ctx, s);
+        if (ps->act == act && ps->state == DIE_READ_WAIT) {
+            ps->act = -1;
+            ps->state = DIE_IDLE;
+        }
+    }
+
+    for (s = 0; s < ctx->slot_count && g_state.cmd_pages_assigned[act] < pages &&
+                        launched < max_p;
+         s++) {
+        plane_slot_t *ps = slot_at(ctx, s);
+        if (ps->state == DIE_IDLE) {
+            ps->act = act;
+            ps->state = data_ready_state;
+            g_state.cmd_pages_assigned[act]++;
+            launched++;
+        }
+    }
+}
+
+static inline int recycle_plane_page(die_ctx_t *ctx, plane_slot_t *ps,
+                                     int act, int data_ready_state) {
+    if (g_state.cmd_pages_assigned[act] < g_state.d.pages_per_block) {
+        ps->act = act;
+        ps->state = data_ready_state;
+        g_state.cmd_pages_assigned[act]++;
+        return 1;
+    }
+
+    ps->act = -1;
+    ps->state = DIE_IDLE;
+    return 0;
+}
+
 static inline void chan_go_idle(int chan_id) {
     g_state.chan[chan_id].act = -1;
     g_state.chan[chan_id].state = CHAN_IDLE;
@@ -81,29 +122,31 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
         die_ctx_t *ctx = die_ctx_at(chan_id, j);
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
-            if ((ps->state == DIE_WRITE_WAIT ||
-                 ps->state == DIE_ERASE_WAIT) &&
-                cur_time >= ps->time) {
+            if (ps->state == DIE_WRITE_WAIT && cur_time >= ps->time) {
                 int act = ps->act;
 
-                if (ps->state == DIE_WRITE_WAIT) {
-                    if (nand_program_pages) {
-                        (*nand_program_pages)++;
-                    }
+                if (nand_program_pages) {
+                    (*nand_program_pages)++;
                 }
+                g_state.cmd_pages_left[act]--;
+                if (g_state.cmd_pages_left[act] == 0) {
+                    g_state.map[act] = 0;
+                    (*inflight_cmds)--;
+                    (*total_cmd)++;
+                    (*write_cmd)++;
+                    completed++;
+                }
+                recycle_plane_page(ctx, ps, act, DIE_WRITE_DATA_READY);
+            } else if (ps->state == DIE_ERASE_WAIT && cur_time >= ps->time) {
+                int act = ps->act;
 
                 ps->act = -1;
                 ps->state = DIE_IDLE;
-                ps->host_pages_left = 0;
                 g_state.map[act] = 0;
                 (*inflight_cmds)--;
                 (*total_cmd)++;
+                (*erase_cmd)++;
                 completed++;
-                if (g_state.cmd_op[act] == OP_WRITE) {
-                    (*write_cmd)++;
-                } else if (g_state.cmd_op[act] == OP_ERASE) {
-                    (*erase_cmd)++;
-                }
             }
         }
     }
@@ -138,7 +181,6 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
             int act = queue_pop(q);
 
             slot_at(ctx, slot)->act = act;
-            slot_at(ctx, slot)->host_pages_left = 0;
             slot_at(ctx, slot)->state = DIE_CMD;
 
             g_state.chan[chan_id].state = CHAN_CMD;
@@ -154,6 +196,27 @@ static inline int try_schedule_cmd(int chan_id, uint64_t cur_time, int op) {
     return 0;
 }
 
+static inline int try_complete_read_wait(int chan_id, uint64_t cur_time) {
+    int j;
+
+    for (j = 0; j < g_state.d.die_per_chan; j++) {
+        int slot;
+        die_ctx_t *ctx = die_ctx_at(chan_id, j);
+        for (slot = 0; slot < ctx->slot_count; slot++) {
+            plane_slot_t *ps = slot_at(ctx, slot);
+            if (ps->state == DIE_READ_WAIT && cur_time >= ps->time) {
+                int act = ps->act;
+
+                g_state.cmd_pages_left[act] = g_state.d.pages_per_block;
+                g_state.cmd_pages_assigned[act] = 0;
+                fanout_plane_pages(ctx, act, DIE_READ_DATA_READY);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
     int j;
 
@@ -163,9 +226,9 @@ static inline int try_schedule_read_data(int chan_id, uint64_t cur_time) {
         die_ctx_t *ctx = die_ctx_at(chan_id, die);
         for (slot = 0; slot < ctx->slot_count; slot++) {
             plane_slot_t *ps = slot_at(ctx, slot);
-            if (ps->state == DIE_READ_WAIT && cur_time >= ps->time) {
+            if (ps->state == DIE_READ_DATA_READY) {
                 g_state.chan[chan_id].state = CHAN_DATA;
-                g_state.chan[chan_id].pages_left = g_state.d.pages_per_block;
+                g_state.chan[chan_id].pages_left = 1;
                 g_state.chan[chan_id].time =
                     cur_time + g_state.d.data_time_read_page;
                 g_state.chan[chan_id].act = ps->act;
@@ -539,6 +602,8 @@ int perf_init(const perf_config_t *cfg) {
     g_state.cmd_op = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_target_chan = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_target_die = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_pages_left = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_pages_assigned = (int *)calloc(cfg->qd, sizeof(int));
     g_state.die_ctx = (die_ctx_t *)calloc(
         cfg->chan_num * g_state.d.die_per_chan, sizeof(die_ctx_t));
     g_state.rr_die = (int *)calloc(cfg->chan_num, sizeof(int));
@@ -546,7 +611,8 @@ int perf_init(const perf_config_t *cfg) {
     g_state.chan = (chan_t *)calloc(cfg->chan_num, sizeof(chan_t));
 
     if (!g_state.map || !g_state.cmd_op || !g_state.cmd_target_chan ||
-        !g_state.cmd_target_die || !g_state.die_ctx || !g_state.rr_die ||
+        !g_state.cmd_target_die || !g_state.cmd_pages_left ||
+        !g_state.cmd_pages_assigned || !g_state.die_ctx || !g_state.rr_die ||
         !g_state.stripe_cursor || !g_state.chan) {
         perf_cleanup();
         return -1;
@@ -610,6 +676,8 @@ void perf_cleanup(void) {
     free(g_state.cmd_op);
     free(g_state.cmd_target_chan);
     free(g_state.cmd_target_die);
+    free(g_state.cmd_pages_left);
+    free(g_state.cmd_pages_assigned);
     free(g_state.die_ctx);
     free(g_state.rr_die);
     free(g_state.stripe_cursor);
@@ -672,6 +740,10 @@ void perf_run(perf_stats_t *stats) {
                     case CHAN_IDLE: {
                         uint64_t cur_time = sim_time;
 
+                        if (try_complete_read_wait(i, cur_time)) {
+                            progressed = 1;
+                            break;
+                        }
                         if (try_schedule_read_data(i, cur_time)) {
                             progressed = 1;
                             break;
@@ -706,9 +778,15 @@ void perf_run(perf_stats_t *stats) {
                                 ps->state = DIE_READ_WAIT;
                                 ps->time = cur_time + g_state.d.tread;
                             } else if (g_state.chan[i].op == OP_WRITE) {
-                                ps->host_pages_left =
+                                int act = g_state.chan[i].act;
+
+                                ps->act = -1;
+                                ps->state = DIE_IDLE;
+                                g_state.cmd_pages_left[act] =
                                     g_state.d.pages_per_block;
-                                ps->state = DIE_WRITE_DATA_READY;
+                                g_state.cmd_pages_assigned[act] = 0;
+                                fanout_plane_pages(ctx, act,
+                                                   DIE_WRITE_DATA_READY);
                             } else {
                                 ps->state = DIE_ERASE_WAIT;
                                 ps->time = cur_time + g_state.d.terase;
@@ -730,31 +808,20 @@ void perf_run(perf_stats_t *stats) {
                             if (g_state.chan[i].op == OP_READ) {
                                 read_bytes +=
                                     (uint64_t)g_state.d.read_bytes_per_page;
-                                if (g_state.chan[i].pages_left > 1) {
-                                    g_state.chan[i].pages_left--;
-                                    g_state.chan[i].time =
-                                        cur_time +
-                                        g_state.d.data_time_read_page;
-                                    progressed = 1;
-                                    break;
+                                g_state.cmd_pages_left[act]--;
+                                if (g_state.cmd_pages_left[act] == 0) {
+                                    g_state.map[act] = 0;
+                                    inflight_cmds--;
+                                    total_cmd++;
+                                    read_cmd++;
                                 }
-                                g_state.map[act] = 0;
-                                inflight_cmds--;
-                                total_cmd++;
-                                read_cmd++;
-                                ps->act = -1;
-                                ps->state = DIE_IDLE;
+                                recycle_plane_page(ctx, ps, act,
+                                                   DIE_READ_DATA_READY);
                             } else if (g_state.chan[i].op == OP_WRITE) {
                                 write_bytes +=
                                     (uint64_t)g_state.d.write_bytes_per_page;
-                                if (ps->host_pages_left > 1) {
-                                    ps->host_pages_left--;
-                                    ps->state = DIE_WRITE_DATA_READY;
-                                } else {
-                                    ps->host_pages_left = 0;
-                                    ps->state = DIE_WRITE_WAIT;
-                                    ps->time = cur_time + g_state.d.tprog;
-                                }
+                                ps->state = DIE_WRITE_WAIT;
+                                ps->time = cur_time + g_state.d.tprog;
                             }
                             chan_go_idle(i);
                             progressed = 1;
