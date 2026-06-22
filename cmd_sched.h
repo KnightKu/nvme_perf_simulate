@@ -10,6 +10,7 @@
 
 #define PERF_STRIPE_CHANNEL_MAJOR 0
 #define PERF_STRIPE_GLOBAL_DIE 1
+#define PERF_STRIPE_PAGE 2
 
 typedef struct perf_config {
     double cmd_overhead;

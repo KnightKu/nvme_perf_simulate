@@ -49,25 +49,32 @@ block_size=0
 io_pattern=random
 ```
 
-**128K sequential read** (8 pages × 16 KiB)
+**128K sequential read** (8 pages × 16 KiB, page stripe across channels)
 
 ```ini
 read_ratio=100
 write_ratio=0
 block_size=131072
 io_pattern=sequential
-stripe_mode=global_die
+stripe_mode=page_stripe
 ```
 
-Multi-page blocks fan out across planes on the target die. Concurrent plane
-count follows DESIGN.md §7: `max_planes_per_die = iwl_slot / die_num` (must be
-a power of two). With the default 128 die / 512 iwl_slot config that is **4
-planes** in parallel per die.
+### Stripe modes
 
-- **Read**: one tR per block, then up to `max_planes_per_die` page DATA
-  transfers in parallel (channel still serial).
-- **Write**: each page does DATA then **one tprog**; up to `max_planes_per_die`
-  pages pipeline DATA/tprog in parallel on the same die.
+| Mode | Use case |
+|------|----------|
+| `channel_major` | Random 4K; round-robin channel then die |
+| `global_die` | Sequential 4K across global die index |
+| `page_stripe` | Multi-page blocks (`block_size > page_size`): page `p` → `chan=(base+p)%chan_num`, `die=(base+p)/chan_num % die_per_chan` |
+
+With `page_stripe`, one host block fans out across channels:
+
+- **Read**: 1× CMD + 1× tR on page-0 location, then all pages transfer DATA in parallel on their channels.
+- **Write**: 1× CMD on page-0 location, then each page does DATA + tprog on its channel in parallel (up to 8 channels for 128K).
+
+Sequential IO advances `stripe_base` by `pages_per_block` per host command.
+
+Multi-page blocks without `page_stripe` keep all pages on one die and use multi-plane fan-out (`max_planes_per_die = iwl_slot / die_num`, default **4**).
 
 ## Output metrics
 

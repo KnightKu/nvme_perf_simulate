@@ -58,6 +58,73 @@ void enqueue_cmd(int chan_id, int die_in_chan, int op, int act) {
     queue_push(&ctx->q[op], act);
 }
 
+void enqueue_host_cmd(int act, int op) {
+    g_state.cmd_page_stripe[act] = 0;
+
+    if (g_state.cfg.stripe_mode == STRIPE_PAGE &&
+        g_state.d.pages_per_block > 1 && op != OP_ERASE) {
+        int chan_id;
+        int die_in_chan;
+
+        g_state.cmd_page_stripe[act] = 1;
+        if (g_state.cfg.io_pattern == IO_PATTERN_SEQUENTIAL) {
+            g_state.cmd_stripe_base[act] = g_state.global_page_stripe;
+            g_state.global_page_stripe += g_state.d.pages_per_block;
+        } else {
+            g_state.cmd_stripe_base[act] = rand() % g_state.cfg.die_num;
+        }
+        page_stripe_target(g_state.cmd_stripe_base[act], 0, &chan_id,
+                           &die_in_chan);
+        g_state.cmd_target_chan[act] = chan_id;
+        g_state.cmd_target_die[act] = die_in_chan;
+        enqueue_cmd(chan_id, die_in_chan, op, act);
+        return;
+    }
+
+    select_target(&g_state.cmd_target_chan[act],
+                  &g_state.cmd_target_die[act]);
+    enqueue_cmd(g_state.cmd_target_chan[act], g_state.cmd_target_die[act], op,
+                act);
+}
+
+static void fanout_page_stripe(int act, int data_ready_state) {
+    int base = g_state.cmd_stripe_base[act];
+
+    while (g_state.cmd_next_page[act] < g_state.d.pages_per_block) {
+        int page = g_state.cmd_next_page[act];
+        int chan_id;
+        int die_in_chan;
+        int s;
+        die_ctx_t *ctx;
+        int assigned = 0;
+
+        page_stripe_target(base, page, &chan_id, &die_in_chan);
+        ctx = die_ctx_at(chan_id, die_in_chan);
+        for (s = 0; s < ctx->slot_count; s++) {
+            plane_slot_t *ps = slot_at(ctx, s);
+
+            if (ps->state == DIE_IDLE ||
+                (ps->act == act && ps->state == DIE_READ_WAIT)) {
+                ps->act = act;
+                ps->state = data_ready_state;
+                g_state.cmd_next_page[act]++;
+                g_state.cmd_pages_assigned[act]++;
+                assigned = 1;
+                break;
+            }
+        }
+        if (!assigned) {
+            break;
+        }
+    }
+}
+
+static void resume_page_stripe(int act, int data_ready_state) {
+    if (host_cmd_page_stripe(act)) {
+        fanout_page_stripe(act, data_ready_state);
+    }
+}
+
 static void fanout_plane_pages(die_ctx_t *ctx, int act, int data_ready_state) {
     int pages = g_state.d.pages_per_block;
     int max_p = g_state.d.max_planes_per_die;
@@ -136,7 +203,13 @@ static inline int complete_wait_ops(int chan_id, uint64_t cur_time,
                     (*write_cmd)++;
                     completed++;
                 }
-                recycle_plane_page(ctx, ps, act, DIE_WRITE_DATA_READY);
+                if (host_cmd_page_stripe(act)) {
+                    ps->act = -1;
+                    ps->state = DIE_IDLE;
+                    resume_page_stripe(act, DIE_WRITE_DATA_READY);
+                } else {
+                    recycle_plane_page(ctx, ps, act, DIE_WRITE_DATA_READY);
+                }
             } else if (ps->state == DIE_ERASE_WAIT && cur_time >= ps->time) {
                 int act = ps->act;
 
@@ -208,8 +281,13 @@ static inline int try_complete_read_wait(int chan_id, uint64_t cur_time) {
                 int act = ps->act;
 
                 g_state.cmd_pages_left[act] = g_state.d.pages_per_block;
+                g_state.cmd_next_page[act] = 0;
                 g_state.cmd_pages_assigned[act] = 0;
-                fanout_plane_pages(ctx, act, DIE_READ_DATA_READY);
+                if (host_cmd_page_stripe(act)) {
+                    fanout_page_stripe(act, DIE_READ_DATA_READY);
+                } else {
+                    fanout_plane_pages(ctx, act, DIE_READ_DATA_READY);
+                }
                 return 1;
             }
         }
@@ -376,6 +454,11 @@ static int set_config_value(perf_config_t *cfg, const char *key,
                    strcmp(value, "die") == 0) {
             cfg->stripe_mode = PERF_STRIPE_GLOBAL_DIE;
             end = (char *)(value + strlen(value));
+        } else if (strcmp(value, "page_stripe") == 0 ||
+                   strcmp(value, "page_across_chan") == 0 ||
+                   strcmp(value, "page") == 0) {
+            cfg->stripe_mode = PERF_STRIPE_PAGE;
+            end = (char *)(value + strlen(value));
         } else {
             return -1;
         }
@@ -505,7 +588,8 @@ int perf_init(const perf_config_t *cfg) {
         return -1;
     }
     if (cfg->stripe_mode != PERF_STRIPE_CHANNEL_MAJOR &&
-        cfg->stripe_mode != PERF_STRIPE_GLOBAL_DIE) {
+        cfg->stripe_mode != PERF_STRIPE_GLOBAL_DIE &&
+        cfg->stripe_mode != PERF_STRIPE_PAGE) {
         return -1;
     }
     if (cfg->block_size < 0) {
@@ -604,6 +688,9 @@ int perf_init(const perf_config_t *cfg) {
     g_state.cmd_target_die = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_pages_left = (int *)calloc(cfg->qd, sizeof(int));
     g_state.cmd_pages_assigned = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_stripe_base = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_page_stripe = (int *)calloc(cfg->qd, sizeof(int));
+    g_state.cmd_next_page = (int *)calloc(cfg->qd, sizeof(int));
     g_state.die_ctx = (die_ctx_t *)calloc(
         cfg->chan_num * g_state.d.die_per_chan, sizeof(die_ctx_t));
     g_state.rr_die = (int *)calloc(cfg->chan_num, sizeof(int));
@@ -612,13 +699,17 @@ int perf_init(const perf_config_t *cfg) {
 
     if (!g_state.map || !g_state.cmd_op || !g_state.cmd_target_chan ||
         !g_state.cmd_target_die || !g_state.cmd_pages_left ||
-        !g_state.cmd_pages_assigned || !g_state.die_ctx || !g_state.rr_die ||
+        !g_state.cmd_pages_assigned || !g_state.cmd_stripe_base ||
+        !g_state.cmd_page_stripe || !g_state.cmd_next_page ||
+        !g_state.die_ctx || !g_state.rr_die ||
         !g_state.stripe_cursor || !g_state.chan) {
         perf_cleanup();
         return -1;
     }
 
     srand((unsigned)time(NULL));
+
+    g_state.global_page_stripe = 0;
 
     for (i = 0; i < cfg->chan_num; i++) {
         for (j = 0; j < g_state.d.die_per_chan; j++) {
@@ -678,6 +769,9 @@ void perf_cleanup(void) {
     free(g_state.cmd_target_die);
     free(g_state.cmd_pages_left);
     free(g_state.cmd_pages_assigned);
+    free(g_state.cmd_stripe_base);
+    free(g_state.cmd_page_stripe);
+    free(g_state.cmd_next_page);
     free(g_state.die_ctx);
     free(g_state.rr_die);
     free(g_state.stripe_cursor);
@@ -784,9 +878,15 @@ void perf_run(perf_stats_t *stats) {
                                 ps->state = DIE_IDLE;
                                 g_state.cmd_pages_left[act] =
                                     g_state.d.pages_per_block;
+                                g_state.cmd_next_page[act] = 0;
                                 g_state.cmd_pages_assigned[act] = 0;
-                                fanout_plane_pages(ctx, act,
-                                                   DIE_WRITE_DATA_READY);
+                                if (host_cmd_page_stripe(act)) {
+                                    fanout_page_stripe(act,
+                                                       DIE_WRITE_DATA_READY);
+                                } else {
+                                    fanout_plane_pages(ctx, act,
+                                                       DIE_WRITE_DATA_READY);
+                                }
                             } else {
                                 ps->state = DIE_ERASE_WAIT;
                                 ps->time = cur_time + g_state.d.terase;
@@ -815,8 +915,15 @@ void perf_run(perf_stats_t *stats) {
                                     total_cmd++;
                                     read_cmd++;
                                 }
-                                recycle_plane_page(ctx, ps, act,
-                                                   DIE_READ_DATA_READY);
+                                if (host_cmd_page_stripe(act)) {
+                                    ps->act = -1;
+                                    ps->state = DIE_IDLE;
+                                    resume_page_stripe(act,
+                                                       DIE_READ_DATA_READY);
+                                } else {
+                                    recycle_plane_page(ctx, ps, act,
+                                                       DIE_READ_DATA_READY);
+                                }
                             } else if (g_state.chan[i].op == OP_WRITE) {
                                 write_bytes +=
                                     (uint64_t)g_state.d.write_bytes_per_page;

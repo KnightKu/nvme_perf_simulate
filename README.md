@@ -41,7 +41,7 @@ Outputs land in `tests/out_nand/` (`*.log`, `summary.csv`, `summary.txt`, `summa
 | `cmd_size`, `block_size` | 4K legacy vs multi-page (128K = 8×16K pages) |
 | `read_ratio`, `write_ratio`, `erase_ratio` | Workload mix |
 | `io_pattern` | `random` or `sequential` |
-| `stripe_mode` | `channel_major` or `global_die` |
+| `stripe_mode` | `channel_major`, `global_die`, or `page_stripe` / `page_across_chan` |
 | `element`, `qd` | Commands to complete and queue depth |
 | `tR`, `tr_fast`, `tprog_eff`, `tERASE` | NAND timings (µs) |
 

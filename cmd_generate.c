@@ -30,14 +30,9 @@ int cmd_generate_try(int tmp_cmd_cnt, int *inflight_cmds) {
     for (i = 0; i < g_state.cfg.qd; i++) {
         if (g_state.map[i] == 0) {
             int op = select_op();
-            int chan_id;
-            int die_in_chan;
 
             g_state.cmd_op[i] = op;
-            select_target(&chan_id, &die_in_chan);
-            g_state.cmd_target_chan[i] = chan_id;
-            g_state.cmd_target_die[i] = die_in_chan;
-            enqueue_cmd(chan_id, die_in_chan, op, i);
+            enqueue_host_cmd(i, op);
             g_state.map[i] = 1;
             (*inflight_cmds)++;
             return 1;
