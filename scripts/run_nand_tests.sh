@@ -124,17 +124,17 @@ run_case seq_write_128k \
 
 run_case rand_read_128k \
     read_ratio=100 write_ratio=0 block_size=131072 io_pattern=random \
-    stripe_mode=page_stripe \
+    stripe_mode=channel_major \
     || FAIL=1
 
 run_case rand_write_128k \
     read_ratio=0 write_ratio=100 block_size=131072 io_pattern=random \
-    stripe_mode=page_stripe \
+    stripe_mode=channel_major \
     || FAIL=1
 
 run_case mixed_rw_70_30_128k \
     read_ratio=70 write_ratio=30 block_size=131072 io_pattern=random \
-    stripe_mode=page_stripe \
+    stripe_mode=channel_major \
     || FAIL=1
 
 echo "========================================"

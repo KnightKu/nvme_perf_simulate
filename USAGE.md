@@ -65,14 +65,16 @@ stripe_mode=page_stripe
 |------|----------|
 | `channel_major` | Random 4K; round-robin channel then die |
 | `global_die` | Sequential 4K across global die index |
-| `page_stripe` | Multi-page blocks (`block_size > page_size`): page `p` → `chan=(base+p)%chan_num`, `die=(base+p)/chan_num % die_per_chan` |
+| `page_stripe` | **Sequential** multi-page blocks (`block_size > page_size`): page `p` → `chan=(base+p)%chan_num`, `die=(base+p)/chan_num % die_per_chan`. Use for fulldev seq 128K. |
 
 With `page_stripe`, one host block fans out across channels:
 
 - **Read**: 1× CMD + 1× tR on page-0 location, then all pages transfer DATA in parallel on their channels.
 - **Write**: 1× CMD on page-0 location, then each page does DATA + tprog on its channel in parallel (up to 8 channels for 128K).
 
-Sequential IO advances `stripe_base` by `pages_per_block` per host command.
+Sequential IO advances `stripe_base` by `pages_per_block` per host command (wrapped to device size). Random IO with `page_stripe` uses aligned `stripe_base` multiples of `pages_per_block`; for random 128K benchmarks prefer `channel_major` (single-die multi-plane).
+
+**128K write bandwidth note:** host write BW is capped by global tprog slots (`iwl_slot` / tprog ≈ 6.5 GB/s at default config), regardless of page_stripe. Page_stripe reduces per-block latency by parallelizing DATA/tprog across channels, but does not raise the aggregate program-page ceiling.
 
 Multi-page blocks without `page_stripe` keep all pages on one die and use multi-plane fan-out (`max_planes_per_die = iwl_slot / die_num`, default **4**).
 

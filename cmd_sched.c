@@ -58,6 +58,40 @@ void enqueue_cmd(int chan_id, int die_in_chan, int op, int act) {
     queue_push(&ctx->q[op], act);
 }
 
+static inline int page_stripe_device_pages(void) {
+    return g_state.cfg.chan_num * g_state.d.die_per_chan;
+}
+
+static inline int page_stripe_block_slots(void) {
+    int device_pages = page_stripe_device_pages();
+    int ppb = g_state.d.pages_per_block;
+
+    if (ppb <= 0 || device_pages <= 0) {
+        return 1;
+    }
+    return device_pages / ppb;
+}
+
+static void assign_page_stripe_base(int act) {
+    int ppb = g_state.d.pages_per_block;
+    int device_pages = page_stripe_device_pages();
+    int slots = page_stripe_block_slots();
+
+    if (g_state.cfg.io_pattern == IO_PATTERN_SEQUENTIAL) {
+        g_state.cmd_stripe_base[act] = g_state.global_page_stripe;
+        g_state.global_page_stripe += ppb;
+        if (device_pages > 0) {
+            g_state.global_page_stripe %= device_pages;
+        }
+        return;
+    }
+
+    if (slots <= 0) {
+        slots = 1;
+    }
+    g_state.cmd_stripe_base[act] = (rand() % slots) * ppb;
+}
+
 void enqueue_host_cmd(int act, int op) {
     g_state.cmd_page_stripe[act] = 0;
 
@@ -67,12 +101,7 @@ void enqueue_host_cmd(int act, int op) {
         int die_in_chan;
 
         g_state.cmd_page_stripe[act] = 1;
-        if (g_state.cfg.io_pattern == IO_PATTERN_SEQUENTIAL) {
-            g_state.cmd_stripe_base[act] = g_state.global_page_stripe;
-            g_state.global_page_stripe += g_state.d.pages_per_block;
-        } else {
-            g_state.cmd_stripe_base[act] = rand() % g_state.cfg.die_num;
-        }
+        assign_page_stripe_base(act);
         page_stripe_target(g_state.cmd_stripe_base[act], 0, &chan_id,
                            &die_in_chan);
         g_state.cmd_target_chan[act] = chan_id;
