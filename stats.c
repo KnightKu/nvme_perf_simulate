@@ -2,6 +2,7 @@
 
 #include "sched_internal.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static double pct_of(double sim, double ceiling) {
@@ -80,4 +81,22 @@ perf_iops_t perf_calc_iops(const perf_stats_t *stats) {
     iops.write = (double)stats->write_cmd * scale * g_state.d.xor_factor;
     iops.erase = (double)stats->erase_cmd * scale * g_state.d.xor_factor;
     return iops;
+}
+
+void perf_print_nand_counters(const perf_stats_t *stats) {
+    if (!stats) {
+        return;
+    }
+    printf("NAND read CMDs = %llu (tR=%llu tr_fast=%llu b2n_prog=%llu)\n",
+           (unsigned long long)stats->nand_read_cmds,
+           (unsigned long long)stats->tR_count,
+           (unsigned long long)stats->tr_fast_count,
+           (unsigned long long)stats->b2n_program_count);
+    if (g_state.initialized) {
+        printf("Spec units: pt=%d cw=%d b2n_pt=%d host_pt=%d pages_per_pt=%d "
+               "(use_spec_units=%d)\n",
+               g_state.d.pt_bytes, g_state.d.cw_bytes, g_state.d.b2n_pt_count,
+               g_state.d.host_pt_count, g_state.d.pages_per_pt,
+               g_state.cfg.use_spec_units);
+    }
 }

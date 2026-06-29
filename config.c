@@ -37,6 +37,9 @@ void perf_config_defaults(perf_config_t *cfg) {
     cfg->write_ratio = 0;
     cfg->erase_ratio = 0;
     cfg->io_pattern = PERF_IO_PATTERN_RANDOM;
+    cfg->pt_bytes = 65536;
+    cfg->cw_bytes = 4096;
+    cfg->use_spec_units = 0;
     cfg->element = 16384;
 }
 
@@ -102,6 +105,12 @@ static int set_config_value(perf_config_t *cfg, const char *key,
         }
     } else if (strcmp(key, "element") == 0) {
         cfg->element = (uint64_t)strtoull(value, &end, 10);
+    } else if (strcmp(key, "pt_bytes") == 0) {
+        cfg->pt_bytes = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "cw_bytes") == 0) {
+        cfg->cw_bytes = (int)strtol(value, &end, 10);
+    } else if (strcmp(key, "use_spec_units") == 0) {
+        cfg->use_spec_units = (int)strtol(value, &end, 10);
     } else if (strcmp(key, "stripe_mode") == 0) {
         /* legacy: ignored on l0-base (stripe removed) */
         end = (char *)(value + strlen(value));

@@ -5,5 +5,6 @@
 
 perf_iops_t perf_calc_iops(const perf_stats_t *stats);
 perf_bandwidth_t perf_calc_bandwidth(const perf_stats_t *stats);
+void perf_print_nand_counters(const perf_stats_t *stats);
 
 #endif

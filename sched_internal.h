@@ -74,6 +74,11 @@ typedef struct perf_derived {
     uint64_t data_time_read_page;
     uint64_t data_time_write_page;
     int pages_per_block;
+    int pt_bytes;
+    int cw_bytes;
+    int b2n_pt_count;
+    int host_pt_count;
+    int pages_per_pt;
     int read_bytes_per_page;
     int write_bytes_per_page;
     int read_bytes_per_cmd;

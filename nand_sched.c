@@ -62,8 +62,8 @@ static void chan_go_idle(int chan_id) {
 
 static int complete_wait_ops(int chan_id, uint64_t cur_time, int *inflight_cmds,
                              uint64_t *total_cmd, uint64_t *write_cmd,
-                             uint64_t *erase_cmd,
-                             uint64_t *nand_program_pages) {
+                             uint64_t *erase_cmd, uint64_t *nand_program_pages,
+                             uint64_t *b2n_program_count) {
     int j;
     int completed = 0;
 
@@ -77,6 +77,9 @@ static int complete_wait_ops(int chan_id, uint64_t cur_time, int *inflight_cmds,
 
                 if (nand_program_pages) {
                     (*nand_program_pages)++;
+                }
+                if (b2n_program_count) {
+                    (*b2n_program_count)++;
                 }
                 g_state.cmd_pages_left[act]--;
                 if (g_state.cmd_pages_left[act] == 0) {
@@ -330,6 +333,10 @@ void perf_run(perf_stats_t *stats) {
     uint64_t read_bytes = 0;
     uint64_t write_bytes = 0;
     uint64_t nand_program_pages = 0;
+    uint64_t nand_read_cmds = 0;
+    uint64_t tR_count = 0;
+    uint64_t tr_fast_count = 0;
+    uint64_t b2n_program_count = 0;
     int tmp_cmd_cnt = 0;
     int inflight_cmds = 0;
     uint64_t start_time = 0;
@@ -365,7 +372,8 @@ void perf_run(perf_stats_t *stats) {
             for (i = 0; i < g_state.cfg.chan_num; i++) {
                 if (complete_wait_ops(i, sim_time, &inflight_cmds, &total_cmd,
                                       &write_cmd, &erase_cmd,
-                                      &nand_program_pages) > 0) {
+                                      &nand_program_pages,
+                                      &b2n_program_count) > 0) {
                     progressed = 1;
                 }
             }
@@ -412,6 +420,12 @@ void perf_run(perf_stats_t *stats) {
                             if (g_state.chan[i].op == OP_READ) {
                                 ps->state = DIE_READ_WAIT;
                                 ps->time = cur_time + g_state.d.tread;
+                                nand_read_cmds++;
+                                if (g_state.cfg.cmd_size == 4096) {
+                                    tr_fast_count++;
+                                } else {
+                                    tR_count++;
+                                }
                             } else if (g_state.chan[i].op == OP_WRITE) {
                                 int act = g_state.chan[i].act;
 
@@ -519,5 +533,9 @@ perf_run_done:
         stats->start_time = start_time;
         stats->end_time = end_time;
         stats->nand_program_pages = nand_program_pages;
+        stats->nand_read_cmds = nand_read_cmds;
+        stats->tR_count = tR_count;
+        stats->tr_fast_count = tr_fast_count;
+        stats->b2n_program_count = b2n_program_count;
     }
 }

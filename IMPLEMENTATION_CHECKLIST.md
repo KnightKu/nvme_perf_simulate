@@ -76,11 +76,11 @@ N0  NAND Core（今天）          §8.1、§8.5
 
 ### M1 — 数据单元（零行为变化）
 
-- [ ] `pt_bytes=65536`、`cw_bytes=4096`
-- [ ] `b2n_pt_count` ← `nand_type`（TLC=3，QLC=4）
-- [ ] Host 块 → PT 数：`block_size / pt_bytes`
-- [ ] 计数器：`nand_read_cmds`、`tR_count`、`tr_fast_count`、`b2n_program_count`
-- [ ] `use_spec_units=0` 时数值与 N0 一致
+- [x] `pt_bytes=65536`、`cw_bytes=4096`
+- [x] `b2n_pt_count` ← `nand_type`（TLC=3，QLC=4）
+- [x] Host 块 → PT 数：`block_size / pt_bytes`
+- [x] 计数器：`nand_read_cmds`、`tR_count`、`tr_fast_count`、`b2n_program_count`
+- [x] `use_spec_units=0` 时数值与 N0 一致
 
 **出口**：统计可见，行为不变。
 
@@ -271,5 +271,6 @@ N0 (l0-base)
 | 版本 | 说明 |
 |------|------|
 | v1.0 | 基于 l0-base（stripe 已移除）+ design_spec v1.0；11 里程碑，N0 基线 |
+| v1.1 | M1 完成：spec 数据单元参数 + NAND 侧计数器 |
 
 *冲突时先修 [`design_spec_v1.0.md`](design_spec_v1.0.md) 再改代码。*

@@ -46,6 +46,20 @@ int perf_config_validate(const perf_config_t *cfg) {
     if (cfg->block_size > 0 && cfg->block_size % cfg->page_size != 0) {
         return -1;
     }
+    if (cfg->pt_bytes <= 0 || cfg->cw_bytes <= 0) {
+        return -1;
+    }
+    if (cfg->pt_bytes % cfg->cw_bytes != 0) {
+        return -1;
+    }
+    if (cfg->use_spec_units != 0 && cfg->use_spec_units != 1) {
+        return -1;
+    }
+    if (cfg->use_spec_units &&
+        cfg->block_size > 0 &&
+        cfg->block_size % cfg->pt_bytes != 0) {
+        return -1;
+    }
 
     {
         uint64_t total_planes =
@@ -72,6 +86,32 @@ int perf_derived_init(const perf_config_t *cfg, perf_derived_t *d) {
     }
 
     memset(d, 0, sizeof(*d));
+
+    d->pt_bytes = cfg->pt_bytes;
+    d->cw_bytes = cfg->cw_bytes;
+    switch (cfg->nand_type) {
+    case 1:
+        d->b2n_pt_count = 1;
+        break;
+    case 3:
+        d->b2n_pt_count = 3;
+        break;
+    case 4:
+        d->b2n_pt_count = 4;
+        break;
+    default:
+        return -1;
+    }
+    if (cfg->pt_bytes % cfg->page_size == 0) {
+        d->pages_per_pt = cfg->pt_bytes / cfg->page_size;
+    }
+    if (cfg->block_size > 0) {
+        if (cfg->block_size % cfg->pt_bytes == 0) {
+            d->host_pt_count = cfg->block_size / cfg->pt_bytes;
+        }
+    } else {
+        d->host_pt_count = 1;
+    }
 
     d->die_per_chan = cfg->die_num / cfg->chan_num;
     {

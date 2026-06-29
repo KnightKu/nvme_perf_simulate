@@ -32,6 +32,9 @@ typedef struct perf_config {
     int write_ratio;
     int erase_ratio;
     int io_pattern;
+    int pt_bytes;
+    int cw_bytes;
+    int use_spec_units;
     uint64_t element;
 } perf_config_t;
 
@@ -45,6 +48,10 @@ typedef struct perf_stats {
     uint64_t start_time;
     uint64_t end_time;
     uint64_t nand_program_pages;
+    uint64_t nand_read_cmds;
+    uint64_t tR_count;
+    uint64_t tr_fast_count;
+    uint64_t b2n_program_count;
 } perf_stats_t;
 
 typedef struct perf_iops {

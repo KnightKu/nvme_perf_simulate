@@ -66,6 +66,7 @@ int main(int argc, char **argv) {
     printf("Total Bandwidth (sim) = %.2f MB/s\n", bw.total_mbps);
     printf("NAND program pages = %llu\n",
            (unsigned long long)stats.nand_program_pages);
+    perf_print_nand_counters(&stats);
 
     perf_cleanup();
     return 0;
