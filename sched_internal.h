@@ -171,7 +171,6 @@ static inline int host_cmd_page_stripe(int act) {
     return g_state.cmd_page_stripe[act] != 0;
 }
 
-void enqueue_host_cmd(int act, int op);
 int cmd_generate_try(int tmp_cmd_cnt, int *inflight_cmds);
 
 #endif

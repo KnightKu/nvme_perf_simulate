@@ -1,4 +1,5 @@
 #include "sched_internal.h"
+#include "stripe.h"
 
 #include <stdlib.h>
 

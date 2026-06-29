@@ -1,6 +1,9 @@
-# nvme_perf_simulate (nand-core)
+# nvme_perf_simulate (nand-core / l0-base)
 
 Minimal multi-channel NAND backend performance simulator.
+
+On branch **`l0-base`**, sources are split into reusable modules (see
+[`L0_BASE.md`](L0_BASE.md)); behavior matches **`nand-core`**.
 
 ## Scope
 
