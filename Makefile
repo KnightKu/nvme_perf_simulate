@@ -1,5 +1,5 @@
 TARGET := nvme_perf_model
-SRCS := main.c config.c timing.c stripe.c nand_sched.c stats.c cmd_generate.c
+SRCS := main.c config.c timing.c host_enqueue.c nand_sched.c stats.c cmd_generate.c
 
 CC ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra

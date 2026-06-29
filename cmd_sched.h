@@ -8,10 +8,6 @@
 #define PERF_IO_PATTERN_RANDOM 0
 #define PERF_IO_PATTERN_SEQUENTIAL 1
 
-#define PERF_STRIPE_CHANNEL_MAJOR 0
-#define PERF_STRIPE_GLOBAL_DIE 1
-#define PERF_STRIPE_PAGE 2
-
 typedef struct perf_config {
     double cmd_overhead;
     double cmd_overhead_sca;
@@ -36,7 +32,6 @@ typedef struct perf_config {
     int write_ratio;
     int erase_ratio;
     int io_pattern;
-    int stripe_mode;
     uint64_t element;
 } perf_config_t;
 

@@ -20,7 +20,7 @@ perf.conf      配置文件
 - `perf_config_t`：配置参数载体
 - `perf_load_config()`：解析配置文件
 - `perf_init()`：初始化全局状态和队列
-- `workload` / `stripe_mode` / `io_pattern` / `block_size`：命令生成与传数粒度
+- `workload` / `io_pattern` / `block_size`：命令生成与传数粒度
 
 #### 调度核心
 - **Channel 状态机**：IDLE / CMD / DATA

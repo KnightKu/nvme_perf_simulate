@@ -3,7 +3,8 @@
 Minimal multi-channel NAND backend performance simulator.
 
 On branch **`l0-base`**, sources are split into reusable modules (see
-[`L0_BASE.md`](L0_BASE.md)); behavior matches **`nand-core`**.
+[`L0_BASE.md`](L0_BASE.md)). Stripe modes are removed; placement uses
+`io_pattern` (random / sequential global die).
 
 ## Scope
 
@@ -50,8 +51,7 @@ Outputs land in `tests/out_nand/` (`*.log`, `summary.csv`, `summary.txt`, `summa
 | `chan_speed` | MB/s per channel (wire rate) |
 | `cmd_size`, `block_size` | 4K legacy vs multi-page (128K = 8×16K pages) |
 | `read_ratio`, `write_ratio`, `erase_ratio` | Workload mix |
-| `io_pattern` | `random` or `sequential` |
-| `stripe_mode` | `channel_major`, `global_die`, or `page_stripe` / `page_across_chan` |
+| `io_pattern` | `random` or `sequential` (global die placement) |
 | `element`, `qd` | Commands to complete and queue depth |
 | `tR`, `tr_fast`, `tprog_eff`, `tERASE` | NAND timings (µs) |
 

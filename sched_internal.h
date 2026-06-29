@@ -24,12 +24,6 @@ enum IO_PATTERN {
     IO_PATTERN_SEQUENTIAL = PERF_IO_PATTERN_SEQUENTIAL,
 };
 
-enum STRIPE_MODE {
-    STRIPE_CHANNEL_MAJOR = PERF_STRIPE_CHANNEL_MAJOR,
-    STRIPE_GLOBAL_DIE = PERF_STRIPE_GLOBAL_DIE,
-    STRIPE_PAGE = PERF_STRIPE_PAGE,
-};
-
 enum DIE_STATE {
     DIE_IDLE,
     DIE_CMD,
@@ -104,16 +98,10 @@ typedef struct perf_state {
     int *cmd_target_die;
     int *cmd_pages_left;
     int *cmd_pages_assigned;
-    int *cmd_stripe_base;
-    int *cmd_page_stripe;
-    int *cmd_next_page;
     die_ctx_t *die_ctx;
     int *rr_die;
-    int *stripe_cursor;
     chan_t *chan;
-    int rr_chan;
     int next_die;
-    int global_page_stripe;
     int initialized;
 } perf_state_t;
 
@@ -157,18 +145,6 @@ static inline int queue_pop(queue_t *q) {
         q->empty = 1;
     }
     return act;
-}
-
-static inline void page_stripe_target(int stripe_base, int page, int *chan_id,
-                                      int *die_in_chan) {
-    int pos = stripe_base + page;
-
-    *chan_id = pos % g_state.cfg.chan_num;
-    *die_in_chan = (pos / g_state.cfg.chan_num) % g_state.d.die_per_chan;
-}
-
-static inline int host_cmd_page_stripe(int act) {
-    return g_state.cmd_page_stripe[act] != 0;
 }
 
 int cmd_generate_try(int tmp_cmd_cnt, int *inflight_cmds);

@@ -40,11 +40,6 @@ int perf_config_validate(const perf_config_t *cfg) {
         cfg->io_pattern != PERF_IO_PATTERN_SEQUENTIAL) {
         return -1;
     }
-    if (cfg->stripe_mode != PERF_STRIPE_CHANNEL_MAJOR &&
-        cfg->stripe_mode != PERF_STRIPE_GLOBAL_DIE &&
-        cfg->stripe_mode != PERF_STRIPE_PAGE) {
-        return -1;
-    }
     if (cfg->block_size < 0) {
         return -1;
     }

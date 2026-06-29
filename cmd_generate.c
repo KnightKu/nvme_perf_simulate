@@ -1,5 +1,5 @@
 #include "sched_internal.h"
-#include "stripe.h"
+#include "host_enqueue.h"
 
 #include <stdlib.h>
 

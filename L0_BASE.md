@@ -1,7 +1,7 @@
 # L0 Base Branch
 
 `l0-base` is the reusable NAND scheduling baseline extracted from `nand-core`.
-Simulation **behavior is unchanged**; sources are split for spec v1.0 evolution.
+Simulation behavior evolves on this branch toward `design_spec_v1.0.md`.
 
 ## Module layout
 
@@ -9,7 +9,7 @@ Simulation **behavior is unchanged**; sources are split for spec v1.0 evolution.
 |------|------|
 | `config.c/h` | Defaults, `.conf` parsing |
 | `timing.c/h` | Config validation, derived timings, ceilings |
-| `stripe.c/h` | Target selection, page_stripe, host enqueue |
+| `host_enqueue.c/h` | Global-die target selection, host enqueue |
 | `nand_sched.c` | Channel/die FSM, `perf_init/run/cleanup` |
 | `stats.c/h` | IOPS and bandwidth |
 | `cmd_generate.c` | Host command injection |
@@ -17,13 +17,18 @@ Simulation **behavior is unchanged**; sources are split for spec v1.0 evolution.
 
 Public API remains in `cmd_sched.h` (`perf_init`, `perf_run`, …).
 
+## Address placement (no stripe)
+
+- **`io_pattern=sequential`**: round-robin global die index.
+- **`io_pattern=random`**: uniform random global die.
+- Multi-page host blocks fan out on **one die** via multi-plane slots (`max_planes_per_die`).
+- Legacy `stripe_mode` in `.conf` is **ignored** (compat only).
+
 ## Regression
 
 ```bash
 make test-nand
 ```
-
-Results should match `nand-core` at the same commit (pre-split).
 
 ## Spec evolution
 
