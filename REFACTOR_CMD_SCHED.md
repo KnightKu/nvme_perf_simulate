@@ -58,7 +58,7 @@ perf_run 主循环
 
 ### 2.1 Layer A — `cmd_generate`（命令产生）
 
-**职责**：按 workload / ratio / stripe 规则**构造 host 命令描述符**，推入 cmd pool。
+**职责**：按 `read/write/erase_ratio` 与 `io_pattern` **构造 host 命令描述符**，推入 cmd pool。
 
 **不负责**：
 
@@ -317,8 +317,8 @@ qd*0.75 限流保留
 ### 6.3 回归清单
 
 - [ ] legacy mixed + channel_major
-- [ ] fulldev_seq_read + page_across_chan
-- [ ] fulldev_seq_write + page_die_rotate
+- [ ] seq_read_128k + io_pattern=sequential
+- [ ] seq_write_128k + io_pattern=sequential
 - [ ] suspend
 - [ ] IOPS/BW + pool_rejects / bus_xfers 输出
 

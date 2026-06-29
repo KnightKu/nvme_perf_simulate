@@ -25,19 +25,12 @@
 - 调度时：高优先级先执行，再 normal，再 low。
 - 生成时：由配置文件的 `prio_*_ratio` 决定。
 
-### 3.4 Workload 与 stripe（命令生成）
+### 3.4 IO 模式与块大小（命令生成）
 
-**Workload**
-- `legacy`：按 `read/write/erase_ratio` 随机操作类型。
-- `fulldev_seq_read` / `fulldev_seq_write`：固定读或写，面向**全盘极限带宽**；
-  自动使用 `channel_major` stripe。
-
-**Stripe**
-- `channel_major`：`rr_chan` 轮询 channel，每 channel 的 `stripe_cursor[ch]` 递增 die（命令级 stripe）。
-- `page_across_chan` / `page_stripe`：**block 内按 page 跨 channel 条带**（fulldev 默认）。
-  - `page p` → `chan = (stripe_base+p) % chan_num`，`die = (stripe_base+p) / chan_num % die_per_chan`。
-  - 同一 host block 的各页在对应 channel 上 **并行** CMD/DATA（读）或 CMD/DATA/tprog（写）。
-- `global_die` + `io_pattern`：`random` 或 global die `sequential`。
+**地址放置（l0-base）**
+- `io_pattern=random`：随机 global die。
+- `io_pattern=sequential`：按 global die 顺序递增。
+- 多块 IO 在同一 die 上 multi-plane fan-out。
 
 **块大小与 tR（cmd_size / block_size / page_size）**
 - `cmd_size`：仅用于读 **tR**（`4096` → `tr_fast`）。
@@ -58,7 +51,7 @@
 ### 3.6 与 fio / 实测对比（范围说明）
 本工具只建模 **NAND channel + die 调度**，不含 PCIe、DMA、对齐、文件系统与主机栈。
 - fio `128K sequential` 报告的是 **端到端** 带宽，通常 ≤ 本工具 **ceiling wire**。
-- 对比时建议：fio 使用相近 `numjobs`≈`chan_num`、`iodepth` 饱和；本工具用 `workload=fulldev_seq_*`、`block_size=128K`。
+- 对比时建议：fio 使用相近 `numjobs`≈`chan_num`、`iodepth` 饱和；本工具用 `read_ratio`/`write_ratio` + `block_size=128K` + `io_pattern=sequential`。
 - sim 接近 **ceiling xor** 或 **wire** 表示后端 channel 已饱和；明显低于 host ceiling 则查 tR/plane/调度。
 
 ## 4. Suspend 机制（读优先）

@@ -155,12 +155,12 @@ summarize_results() {
 FAIL=0
 
 run_case seq_read_4k \
-    workload=legacy read_ratio=100 write_ratio=0 block_size=0 \
+    read_ratio=100 write_ratio=0 block_size=0 \
     io_pattern=sequential stripe_mode=global_die \
     || FAIL=1
 
 run_case seq_write_4k \
-    workload=legacy read_ratio=0 write_ratio=100 block_size=0 \
+    read_ratio=0 write_ratio=100 block_size=0 \
     io_pattern=sequential stripe_mode=global_die \
     || FAIL=1
 
@@ -181,11 +181,11 @@ run_case mixed_rw_50_50 \
     || FAIL=1
 
 run_case seq_read_128k \
-    workload=fulldev_seq_read block_size=131072 read_ratio=100 write_ratio=0 \
+    block_size=131072 read_ratio=100 write_ratio=0 io_pattern=sequential \
     || FAIL=1
 
 run_case seq_write_128k \
-    workload=fulldev_seq_write block_size=131072 read_ratio=0 write_ratio=100 \
+    block_size=131072 read_ratio=0 write_ratio=100 io_pattern=sequential \
     || FAIL=1
 
 run_case rand_read_128k \

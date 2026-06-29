@@ -198,12 +198,12 @@ function Summarize-Results {
 $Fail = 0
 
 if (-not (Run-Case "seq_read_4k" @{
-        workload = "legacy"; read_ratio = 100; write_ratio = 0; block_size = 0
+        read_ratio = 100; write_ratio = 0; block_size = 0
         io_pattern = "sequential"; stripe_mode = "global_die"
     })) { $Fail = 1 }
 
 if (-not (Run-Case "seq_write_4k" @{
-        workload = "legacy"; read_ratio = 0; write_ratio = 100; block_size = 0
+        read_ratio = 0; write_ratio = 100; block_size = 0
         io_pattern = "sequential"; stripe_mode = "global_die"
     })) { $Fail = 1 }
 
@@ -224,13 +224,13 @@ if (-not (Run-Case "mixed_rw_50_50" @{
     })) { $Fail = 1 }
 
 if (-not (Run-Case "seq_read_128k" @{
-        workload = "fulldev_seq_read"; block_size = 131072
-        read_ratio = 100; write_ratio = 0
+        block_size = 131072; read_ratio = 100; write_ratio = 0
+        io_pattern = "sequential"
     })) { $Fail = 1 }
 
 if (-not (Run-Case "seq_write_128k" @{
-        workload = "fulldev_seq_write"; block_size = 131072
-        read_ratio = 0; write_ratio = 100
+        block_size = 131072; read_ratio = 0; write_ratio = 100
+        io_pattern = "sequential"
     })) { $Fail = 1 }
 
 if (-not (Run-Case "rand_read_128k" @{

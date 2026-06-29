@@ -56,14 +56,14 @@ CASE_META: dict[str, dict[str, object]] = {
     },
     "seq_read_128k": {
         "category": "sequential_read",
-        "label": "Sequential Read (fulldev)",
+        "label": "Sequential Read 128K",
         "block": "128K",
         "read_ratio": 100,
         "write_ratio": 0,
     },
     "seq_write_128k": {
         "category": "sequential_write",
-        "label": "Sequential Write (fulldev)",
+        "label": "Sequential Write 128K",
         "block": "128K",
         "read_ratio": 0,
         "write_ratio": 100,
